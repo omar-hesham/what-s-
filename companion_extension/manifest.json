@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "OWI - WhatsApp Web Companion",
+  "version": "1.0.0",
+  "description": "User-initiated capture companion for Omar WhatsApp Intelligence (OWI). 100% Local & Privacy-Conscious.",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "OWI WhatsApp Web Companion"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}

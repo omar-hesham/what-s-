@@ -1,0 +1,38 @@
+# Python virtual environments & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+backend/.venv/
+.venv/
+env/
+venv/
+*.egg-info/
+.eggs/
+
+# Testing & caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node dependencies (prebuilt frontend/dist is tracked for standalone zero-node execution)
+frontend/node_modules/
+*.log
+
+# Private user data & WhatsApp media (Data Sovereignty)
+data/owi.db*
+data/media/*
+!data/media/.gitkeep
+data/sources/*
+!data/sources/.gitkeep
+data/derived/*
+!data/derived/.gitkeep
+data/backups/*
+!data/backups/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/models/*
+!data/models/.gitkeep
+
+# Environment & secrets
+.env
+.env.local

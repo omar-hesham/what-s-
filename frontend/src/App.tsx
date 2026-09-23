@@ -11,6 +11,9 @@ import { PropertyStoneView } from './components/PropertyStoneView';
 import { CostScreen } from './components/CostScreen';
 import { ModelManager } from './components/ModelManager';
 import { StorageDashboard } from './components/StorageDashboard';
+import { DecisionsView } from './components/DecisionsView';
+import { IdeasView } from './components/IdeasView';
+import { ResearchView } from './components/ResearchView';
 import { SearchModal } from './components/SearchModal';
 import { FirstRunWizard } from './components/FirstRunWizard';
 
@@ -37,6 +40,17 @@ export const App: React.FC = () => {
     document.documentElement.dir = language === 'ar' ? 'rtl' : 'ltr';
     document.documentElement.lang = language;
   }, [language]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   useEffect(() => {
     loadInitialData();
@@ -172,6 +186,9 @@ export const App: React.FC = () => {
         {currentView === 'tasks' && <TaskInbox language={language} onTaskChange={loadInitialData} />}
         {currentView === 'waiting' && <WaitingForView language={language} onUpdate={loadInitialData} />}
         {currentView === 'properties' && <PropertyStoneView language={language} />}
+        {currentView === 'decisions' && <DecisionsView language={language} />}
+        {currentView === 'ideas' && <IdeasView language={language} />}
+        {currentView === 'research' && <ResearchView language={language} />}
         {currentView === 'cost' && <CostScreen language={language} />}
         {currentView === 'models' && <ModelManager language={language} />}
         {currentView === 'storage' && <StorageDashboard language={language} />}

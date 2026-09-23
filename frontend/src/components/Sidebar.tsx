@@ -36,6 +36,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const navItems = [
     { id: 'inbox', label: isAr ? 'الوارد الذكي' : 'AI Inbox', icon: Inbox, badge: inboxCount },
     { id: 'today', label: isAr ? 'اليوم والموجز' : 'Today & Briefing', icon: Calendar },
+    { id: 'search', label: isAr ? 'البحث الشامل (Ctrl+K)' : 'Global Search (Ctrl+K)', icon: Search },
     { id: 'timeline', label: isAr ? 'المحادثات' : 'Chats Timeline', icon: MessageSquare },
     { id: 'tasks', label: isAr ? 'المهام' : 'Tasks', icon: CheckSquare },
     { id: 'waiting', label: isAr ? 'قيد الانتظار' : 'Waiting For', icon: Clock, badge: waitingCount },

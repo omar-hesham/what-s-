@@ -168,7 +168,7 @@ def restore_backup(
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
 
-        # 2. Verify database checksum
+        # 2. Verify database checksum and SQLite integrity in staging
         restored_db_path = temp_stage / "owi.db"
         if not restored_db_path.exists():
             raise ValueError("Invalid backup: missing owi.db database snapshot")
@@ -178,12 +178,37 @@ def restore_backup(
         if expected_db_sha and actual_db_sha != expected_db_sha:
             raise ValueError(f"Database SHA-256 mismatch! Expected {expected_db_sha}, got {actual_db_sha}")
 
-        # 3. Verify all assets in staging
+        # Check SQLite integrity check on restored snapshot in staging
+        import sqlite3
+        staged_conn = sqlite3.connect(str(restored_db_path))
+        try:
+            check_res = staged_conn.execute("PRAGMA integrity_check").fetchone()
+            if not check_res or check_res[0] != "ok":
+                raise ValueError(f"Restored database snapshot failed SQLite integrity check: {check_res}")
+        finally:
+            staged_conn.close()
+
+        # 3. Verify all assets in staging and enforce strict manifest whitelist
         staged_assets_dir = temp_stage / "assets"
+        manifest_assets = manifest.get("assets", [])
+        manifest_rel_map = {a["relative_path"]: a["sha256"] for a in manifest_assets}
+        allowed_roots = ("media/audio/", "media/images/", "media/video/", "media/documents/", "sources/")
+
+        # Verify that EVERY file in staging is accounted for and in an allowed destination
+        if staged_assets_dir.exists():
+            for item in staged_assets_dir.rglob("*"):
+                if item.is_file():
+                    rel_str = str(item.relative_to(staged_assets_dir)).replace("\\", "/")
+                    if rel_str not in manifest_rel_map:
+                        raise ValueError(f"Security error: unlisted unexpected file in backup archive: {rel_str}")
+                    if not any(rel_str.startswith(r) for r in allowed_roots):
+                        raise ValueError(f"Security error: unapproved destination path for asset: {rel_str}")
+                    if rel_str.endswith("owi.db") or "owi.db" in rel_str:
+                        raise ValueError(f"Security error: unauthorized database file in assets archive: {rel_str}")
+
+        # Verify each manifest asset exists and matches expected SHA-256
         verified_assets_count = 0
-        for asset in manifest.get("assets", []):
-            rel_path = asset["relative_path"]
-            expected_sha = asset["sha256"]
+        for rel_path, expected_sha in manifest_rel_map.items():
             staged_file = staged_assets_dir / rel_path
             if not staged_file.exists():
                 raise ValueError(f"Missing asset in backup archive: {rel_path}")
@@ -192,29 +217,42 @@ def restore_backup(
                 raise ValueError(f"Asset integrity check failed for {rel_path}: checksum mismatch")
             verified_assets_count += 1
 
-        # 4. Atomic switch into target_data_dir
+        # 4. Atomic, safe switch into target_data_dir over active WAL
         target_data_dir.mkdir(parents=True, exist_ok=True)
         target_db_path = target_data_dir / "owi.db"
+        target_wal = target_data_dir / "owi.db-wal"
+        target_shm = target_data_dir / "owi.db-shm"
 
-        # If an active database exists, create a pre-restore safety copy
+        # Dispose active SQLAlchemy engine connections before replacing database files
+        from owi.db.database import engine
+        try:
+            engine.dispose()
+        except Exception as e:
+            logger.warning(f"Engine dispose notice during restore: {e}")
+
+        # If an active database exists, create a pre-restore safety copy and clear old WAL
         if target_db_path.exists():
-            pre_restore_backup = target_data_dir / f"owi.db.pre_restore_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            pre_restore_backup = target_data_dir / f"owi.db.pre_restore_{ts}"
             try:
                 shutil.copy2(target_db_path, pre_restore_backup)
+                if target_wal.exists():
+                    shutil.copy2(target_wal, target_data_dir / f"owi.db-wal.pre_restore_{ts}")
+                    target_wal.unlink(missing_ok=True)
+                if target_shm.exists():
+                    target_shm.unlink(missing_ok=True)
             except Exception as e:
-                logger.warning(f"Could not create pre-restore copy: {e}")
+                logger.warning(f"Pre-restore safety copy notice: {e}")
 
         # Copy restored database
         shutil.copy2(restored_db_path, target_db_path)
 
-        # Copy verified assets
-        if staged_assets_dir.exists():
-            for item in staged_assets_dir.rglob("*"):
-                if item.is_file():
-                    rel = item.relative_to(staged_assets_dir)
-                    dest_file = target_data_dir / rel
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, dest_file)
+        # Copy only validated assets from manifest whitelist
+        for rel_path in manifest_rel_map.keys():
+            src_file = staged_assets_dir / rel_path
+            dest_file = target_data_dir / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dest_file)
 
     logger.info(f"Successfully restored backup to {target_data_dir} ({verified_assets_count} assets verified).")
     return {

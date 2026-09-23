@@ -195,5 +195,20 @@ export const apiClient = {
       body: JSON.stringify({ profile }),
     });
     return res.json();
+  },
+
+  async attachMediaToMessage(messageId: number, file: File): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/api/messages/${messageId}/attach`, {
+      method: 'POST',
+      body: formData,
+    });
+    return res.json();
+  },
+
+  async getPairingCode(): Promise<{ code: string; expires_in_seconds: number }> {
+    const res = await fetch(`${API_BASE}/api/companion/pairing/code`);
+    return res.json();
   }
 };

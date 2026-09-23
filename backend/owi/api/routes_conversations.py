@@ -7,10 +7,12 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from owi.db.database import get_db
 from owi.db.models import Conversation, Message, MediaAsset, Task, Property
+from owi.db.migrations import sync_message_fts
 from owi.ingest.whatsapp_parser import WhatsAppParser
 from owi.ingest.zip_importer import ZipImporter
 from owi.ai.local_nlp import LocalNLPEngine
@@ -80,6 +82,7 @@ def get_conversation(conversation_id: int, db: Session = Depends(get_db)):
 async def import_text_export(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
+    force_reimport: bool = Form(False),
     db: Session = Depends(get_db)
 ):
     """Import a raw WhatsApp .txt chat export file."""
@@ -92,6 +95,16 @@ async def import_text_export(
 
     conv_title = title or Path(file.filename).stem.replace("WhatsApp Chat - ", "")
     text_hash = compute_sha256(content)
+
+    existing = db.query(Conversation).filter(Conversation.source_hash == text_hash).first()
+    if existing and not force_reimport:
+        return {
+            "status": "already_imported",
+            "conversation_id": existing.id,
+            "title": existing.title,
+            "message_count": existing.message_count,
+            "duplicate": True
+        }
 
     conv = Conversation(
         title=conv_title,
@@ -118,6 +131,9 @@ async def import_text_export(
             source_index=pmsg.source_index
         )
         db.add(m)
+        db.flush()
+        # Sync to SQLite FTS5 search
+        sync_message_fts(db.connection(), m.id, m.content or "", m.sender_name or "")
 
     db.commit()
 
@@ -186,6 +202,17 @@ def delete_conversation(conversation_id: int, db: Session = Depends(get_db)):
     conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Clean up SQLite FTS5 records
+    msg_ids = [m[0] for m in db.query(Message.id).filter(Message.conversation_id == conversation_id).all()]
+    if msg_ids:
+        try:
+            for i in range(0, len(msg_ids), 500):
+                batch = msg_ids[i:i + 500]
+                placeholders = ",".join(str(mid) for mid in batch)
+                db.execute(text(f"DELETE FROM messages_fts WHERE message_id IN ({placeholders});"))
+        except Exception as fts_err:
+            logger.warning(f"Could not delete FTS records for conversation {conversation_id}: {fts_err}")
 
     # Remove media files from disk
     media_assets = db.query(MediaAsset).filter(MediaAsset.conversation_id == conversation_id).all()

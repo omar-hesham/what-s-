@@ -5,8 +5,8 @@
   <title>OWI Companion</title>
   <style>
     body {
-      width: 320px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Cairo", sans-serif;
       margin: 0;
       padding: 16px;
       background: #0f172a;
@@ -15,29 +15,68 @@
     h1 {
       font-size: 15px;
       margin-top: 0;
+      margin-bottom: 8px;
       color: #25D366;
       display: flex;
       align-items: center;
       gap: 6px;
     }
-    p {
-      font-size: 12px;
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge-connected {
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border: 1px solid #10b981;
+    }
+    .badge-disconnected {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      border: 1px solid #ef4444;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+      border: 1px solid #334155;
+    }
+    label {
+      display: block;
+      font-size: 11.5px;
       color: #94a3b8;
-      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      background: #0f172a;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 13px;
+      margin-bottom: 8px;
     }
     .btn {
       display: block;
       width: 100%;
+      box-sizing: border-box;
       padding: 10px;
-      margin: 8px 0;
+      margin: 8px 0 4px 0;
       background: #2563eb;
       color: white;
       border: none;
-      border-radius: 8px;
+      border-radius: 6px;
       font-weight: 600;
       font-size: 12.5px;
       cursor: pointer;
       text-align: center;
+      transition: background 0.15s;
     }
     .btn:hover {
       background: #1d4ed8;
@@ -48,12 +87,19 @@
     .btn-green:hover {
       background: #047857;
     }
-    #status {
+    .btn-gray {
+      background: #475569;
+    }
+    .btn-gray:hover {
+      background: #334155;
+    }
+    .status-msg {
       margin-top: 10px;
-      font-size: 11px;
-      padding: 6px 10px;
+      font-size: 11.5px;
+      padding: 8px 10px;
       border-radius: 6px;
       display: none;
+      line-height: 1.4;
     }
     .status-success {
       background: rgba(16, 185, 129, 0.2);
@@ -65,16 +111,43 @@
       color: #f87171;
       border: 1px solid #ef4444;
     }
+    .status-info {
+      background: rgba(59, 130, 246, 0.2);
+      color: #93c5fd;
+      border: 1px solid #3b82f6;
+    }
+    .meta-txt {
+      font-size: 11px;
+      color: #64748b;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
   <h1>● رفيق واتساب ويب (OWI)</h1>
-  <p>التقاط بطلب المستخدم وإرسال إلى تطبيق عمر للذكاء الاصطناعي المحلي.</p>
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+    <span style="font-size: 12px; color: #94a3b8;">حالة الربط:</span>
+    <span id="conn-badge" class="badge badge-disconnected">غير مقترن</span>
+  </div>
 
-  <button id="capture-visible" class="btn btn-green">📥 التقاط الرسائل المرئية الحالية</button>
-  <button id="open-owi" class="btn">🚀 فتح تطبيق OWI المحلي</button>
+  <!-- Pairing Section (Shown when disconnected) -->
+  <div id="pair-section" class="card">
+    <label>رمز الاقتران (6 أرقام من تطبيق OWI):</label>
+    <input type="text" id="pair-code" placeholder="مثال: 123456" maxlength="6" style="letter-spacing: 4px; font-weight: bold; text-align: center;">
+    <label>عنوان الخادم المحلي:</label>
+    <input type="text" id="backend-url" value="http://127.0.0.1:8765">
+    <button id="pair-btn" class="btn btn-green">🔗 إتمام الاقتران والربط</button>
+    <div class="meta-txt">احصل على الرمز من شاشة النظام في تطبيق OWI. الرمز صالح لمدة 5 دقائق.</div>
+  </div>
 
-  <div id="status"></div>
+  <!-- Capture Section (Shown when connected) -->
+  <div id="capture-section" class="card" style="display: none;">
+    <button id="capture-btn" class="btn btn-green">📥 التقاط المحادثة المفتوحة حالياً</button>
+    <button id="open-app-btn" class="btn btn-gray">🚀 فتح تطبيق OWI</button>
+    <button id="unpair-btn" style="background: none; border: none; color: #ef4444; font-size: 11px; cursor: pointer; text-decoration: underline; margin-top: 8px; width: 100%;">إلغاء اقتران هذه الإضافة</button>
+  </div>
+
+  <div id="status-box" class="status-msg"></div>
 
   <script src="popup.js"></script>
 </body>

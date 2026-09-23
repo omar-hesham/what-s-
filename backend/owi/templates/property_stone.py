@@ -99,7 +99,9 @@ class PropertyStoneEngine:
             deal_type = "rent"
 
         # 6. License & Finishing
-        has_admin_license = any(w in combined_text for w in ["إداري", "اداري", "رخصة إداري", "admin license"])
+        admin_negation = bool(re.search(r'(?:بدون|غير|لا\s*يوجد|دون|ليست|ليس|فاقدة)\s*(?:بها\s*)?(?:رخصة\s*|ترخيص\s*)?(?:إداري|اداري|تجاري|admin)', combined_text, re.IGNORECASE))
+        has_admin_positive = any(w in combined_text for w in ["إداري", "اداري", "رخصة إداري", "admin license"])
+        has_admin_license = has_admin_positive and not admin_negation
         finishing = None
         if any(w in combined_text for w in ["الترا سوبر لوكس", "الترا لوكس", "ultra lux"]):
             finishing = "Ultra Lux"

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   MessageSquare, Sparkles, Filter, Search, Mic,
-  Image as ImageIcon, FileText, Video, Trash2, ArrowUpDown
+  Image as ImageIcon, FileText, Video, Trash2, ArrowUpDown,
+  Paperclip, Upload, Loader2
 } from 'lucide-react';
 import { Conversation, Message } from '../types';
 import { apiClient } from '../api/client';
@@ -25,9 +26,39 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
   const [filterType, setFilterType] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
+  const [uploadingMsgId, setUploadingMsgId] = useState<number | null>(null);
+  const activeInputMsgId = useRef<number | null>(null);
+  const hiddenFileInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const isAr = language === 'ar';
+
+  const handleSelectFile = (msgId: number) => {
+    activeInputMsgId.current = msgId;
+    if (hiddenFileInputRef.current) {
+      hiddenFileInputRef.current.value = '';
+      hiddenFileInputRef.current.click();
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const msgId = activeInputMsgId.current;
+    if (!file || !msgId) return;
+
+    setUploadingMsgId(msgId);
+    try {
+      await apiClient.attachMediaToMessage(msgId, file);
+      await loadMessages();
+      onRefreshConversation();
+    } catch (err) {
+      console.error('Failed to attach media:', err);
+      alert(isAr ? 'فشل إرفاق الملف، يرجى المحاولة مرة أخرى.' : 'Failed to attach file, please try again.');
+    } finally {
+      setUploadingMsgId(null);
+      activeInputMsgId.current = null;
+    }
+  };
 
   useEffect(() => {
     if (conversation) {
@@ -196,7 +227,11 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
         ) : (
           filteredMessages.map((msg) => {
             const isSystem = msg.message_type === 'system';
-            const isOmar = msg.sender_name.toLowerCase().includes('omar');
+            const isOmar = ['you', 'أنت', 'omar'].includes(msg.sender_name.trim().toLowerCase());
+            const isOmitted = (msg.content || '').includes('omitted>') || (msg.content || '').includes('<Media omitted>') || (msg.content || '').includes('<تم حذف');
+            const isVoiceOmitted = (msg.content || '').toLowerCase().includes('voice');
+            const isImageOmitted = (msg.content || '').toLowerCase().includes('image');
+            const isDocOmitted = (msg.content || '').toLowerCase().includes('document');
 
             if (isSystem) {
               return (
@@ -226,6 +261,62 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
                   {msg.content}
                 </p>
 
+                {/* Omitted Media Box with Attach Action */}
+                {isOmitted && (!msg.media_assets || msg.media_assets.length === 0) && (
+                  <div style={{
+                    marginTop: '8px',
+                    padding: '8px 10px',
+                    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+                    borderRadius: '8px',
+                    border: '1px dashed var(--border-color)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: 'var(--text-secondary)' }}>
+                      {isVoiceOmitted ? <Mic size={14} color="#34d399" /> : isImageOmitted ? <ImageIcon size={14} color="#60a5fa" /> : <FileText size={14} color="#fbbf24" />}
+                      <span style={{ fontWeight: 600 }}>
+                        {isVoiceOmitted ? (isAr ? 'تسجيل صوتي (لم يُصدَّر مع ملف المحادثة)' : 'Voice note omitted in export') :
+                         isImageOmitted ? (isAr ? 'صورة مرفقة (لم تُصدَّر مع ملف المحادثة)' : 'Image omitted in export') :
+                         isDocOmitted ? (isAr ? 'مستند مرفق (لم يُصدَّر مع ملف المحادثة)' : 'Document omitted in export') :
+                         (isAr ? 'ملف وسائط لم يُصدَّر مع المحادثة' : 'Media omitted in export')}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => handleSelectFile(msg.id)}
+                      disabled={uploadingMsgId === msg.id}
+                      style={{
+                        alignSelf: isAr ? 'flex-start' : 'flex-end',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '4px 10px',
+                        backgroundColor: 'var(--accent-color)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        cursor: uploadingMsgId === msg.id ? 'not-allowed' : 'pointer',
+                        opacity: uploadingMsgId === msg.id ? 0.7 : 1
+                      }}
+                    >
+                      {uploadingMsgId === msg.id ? (
+                        <>
+                          <Loader2 size={12} className="spin" />
+                          <span>{isAr ? 'جارٍ التفريغ والتحليل بالذكاء الاصطناعي...' : 'Processing with AI...'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Paperclip size={12} />
+                          <span>{isAr ? 'إرفاق الملف الآن (صوت / صورة / مستند)' : 'Attach File Now'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
                 {/* Render Media Attachments */}
                 {msg.media_assets && msg.media_assets.length > 0 && (
                   <div style={{ marginTop: '6px' }}>
@@ -249,6 +340,7 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
         )}
         <div ref={messagesEndRef} />
       </div>
+      <input type="file" ref={hiddenFileInputRef} onChange={handleFileChange} style={{ display: 'none' }} />
     </div>
   );
 };

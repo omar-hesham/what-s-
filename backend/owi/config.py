@@ -3,14 +3,20 @@ Application configuration for Omar WhatsApp Intelligence (OWI).
 All configuration defaults to local-first, zero-cost, and privacy-conscious settings.
 """
 
+import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 WORKSPACE_DIR = BASE_DIR.parent
 DEFAULT_DATA_DIR = WORKSPACE_DIR / "data"
+
+# Automatically load local .env from workspace or backend directory
+load_dotenv(WORKSPACE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env")
 
 class Settings(BaseSettings):
     # Application identity
@@ -34,6 +40,11 @@ class Settings(BaseSettings):
     RECURRING_SOFTWARE_FEE: str = "None ($0.00)"
     CLOUD_AI_ENABLED: bool = False
     CLOUD_STORAGE_ENABLED: bool = False
+
+    # Gemini Multimodal API Configuration (Optional BYOK, stored strictly in local .env)
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_ENABLED: bool = bool(os.getenv("GEMINI_API_KEY"))
     
     # Companion Security
     COMPANION_SECRET_KEY: str = "owi-companion-local-bridge-key-2026"

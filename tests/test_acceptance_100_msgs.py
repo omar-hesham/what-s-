@@ -6,6 +6,7 @@ and grounded conversational Q&A search with local citations.
 """
 
 from pathlib import Path
+from owi.config import WORKSPACE_DIR
 from owi.ingest.zip_importer import ZipImporter
 from owi.ai.local_nlp import LocalNLPEngine
 from owi.templates.property_stone import PropertyStoneEngine
@@ -13,7 +14,7 @@ from owi.ai.rag import AskWhatsAppEngine
 from owi.db.models import Conversation, Message, Task, WaitingFor, Decision, Commitment, Property, MediaAsset
 
 def test_acceptance_100_messages_pipeline(test_db):
-    zip_path = Path("synthetic_chats/WhatsApp Chat - Omar Team Office.zip")
+    zip_path = WORKSPACE_DIR / "synthetic_chats" / "WhatsApp Chat - Omar Team Office.zip"
     assert zip_path.exists(), "Synthetic dataset ZIP archive must exist."
 
     # 1. Ingest WhatsApp Export ZIP archive

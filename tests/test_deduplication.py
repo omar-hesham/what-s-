@@ -1,8 +1,6 @@
-"""
-Unit tests for SHA-256 deduplication and idempotent import behavior.
-"""
-
+import pytest
 from pathlib import Path
+from owi.config import WORKSPACE_DIR
 from owi.core.hashing import compute_sha256, compute_text_fingerprint
 from owi.ingest.zip_importer import ZipImporter
 
@@ -17,7 +15,7 @@ def test_sha256_computation(tmp_path):
     assert compute_text_fingerprint("  Hello   WhatsApp   Intelligence  ") == compute_sha256("Hello WhatsApp Intelligence")
 
 def test_idempotent_zip_import(test_db):
-    zip_path = Path("synthetic_chats/WhatsApp Chat - Omar Team Office.zip")
+    zip_path = WORKSPACE_DIR / "synthetic_chats" / "WhatsApp Chat - Omar Team Office.zip"
     if not zip_path.exists():
         pytest.skip("Synthetic ZIP archive not found")
 

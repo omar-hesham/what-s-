@@ -60,101 +60,121 @@ class LocalNLPEngine:
         ideas_found = []
 
         # 1. Tasks
-        for pat in TASK_PATTERNS:
-            m = pat.search(text)
-            if m:
-                task_content = m.group(1).strip()
-                due_date = resolve_relative_date(text, msg_date)
-                task = Task(
-                    conversation_id=message.conversation_id,
-                    message_id=message.id,
-                    title=f"{task_content[:80]}",
-                    description=text,
-                    status="inbox",
-                    priority="medium",
-                    confidence=0.88,
-                    created_date=msg_date,
-                    due_date=due_date,
-                    assigned_contact_name=sender if "هبعت" in text or "i will" in text.lower() else None,
-                    source_excerpt=text[:250]
-                )
-                db.add(task)
-                tasks_found.append(task)
-                break
+        existing_task = db.query(Task).filter(Task.message_id == message.id).first()
+        if not existing_task:
+            for pat in TASK_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    task_content = m.group(1).strip()
+                    due_date = resolve_relative_date(text, msg_date)
+                    task = Task(
+                        conversation_id=message.conversation_id,
+                        message_id=message.id,
+                        title=f"{task_content[:80]}",
+                        description=text,
+                        status="inbox",
+                        priority="medium",
+                        confidence=0.88,
+                        created_date=msg_date,
+                        due_date=due_date,
+                        assigned_contact_name=sender if "هبعت" in text or "i will" in text.lower() else None,
+                        source_excerpt=text[:250]
+                    )
+                    db.add(task)
+                    tasks_found.append(task)
+                    break
+        else:
+            tasks_found.append(existing_task)
 
         # 2. Waiting For
-        for pat in WAITING_PATTERNS:
-            m = pat.search(text)
-            if m:
-                groups = m.groups()
-                person = groups[0].strip() if len(groups) > 1 else sender
-                deliverable = groups[1].strip() if len(groups) > 1 else groups[0].strip()
-                due_date = resolve_relative_date(text, msg_date)
-                
-                wf = WaitingFor(
-                    conversation_id=message.conversation_id,
-                    message_id=message.id,
-                    person_name=person,
-                    deliverable=deliverable[:200],
-                    status="open",
-                    due_date=due_date,
-                    source_excerpt=text[:250]
-                )
-                db.add(wf)
-                waiting_found.append(wf)
-                break
+        existing_wf = db.query(WaitingFor).filter(WaitingFor.message_id == message.id).first()
+        if not existing_wf:
+            for pat in WAITING_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    groups = m.groups()
+                    person = groups[0].strip() if len(groups) > 1 else sender
+                    deliverable = groups[1].strip() if len(groups) > 1 else groups[0].strip()
+                    due_date = resolve_relative_date(text, msg_date)
+                    
+                    wf = WaitingFor(
+                        conversation_id=message.conversation_id,
+                        message_id=message.id,
+                        person_name=person,
+                        deliverable=deliverable[:200],
+                        status="open",
+                        due_date=due_date,
+                        source_excerpt=text[:250]
+                    )
+                    db.add(wf)
+                    waiting_found.append(wf)
+                    break
+        else:
+            waiting_found.append(existing_wf)
 
         # 3. Decisions
-        for pat in DECISION_PATTERNS:
-            m = pat.search(text)
-            if m:
-                decision_text = m.group(1).strip()
-                dec = Decision(
-                    conversation_id=message.conversation_id,
-                    message_id=message.id,
-                    decision_text=decision_text,
-                    confidence=0.90,
-                    participants=sender,
-                    timestamp=msg_date,
-                    source_excerpt=text[:250]
-                )
-                db.add(dec)
-                decisions_found.append(dec)
-                break
+        existing_dec = db.query(Decision).filter(Decision.message_id == message.id).first()
+        if not existing_dec:
+            for pat in DECISION_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    decision_text = m.group(1).strip()
+                    dec = Decision(
+                        conversation_id=message.conversation_id,
+                        message_id=message.id,
+                        decision_text=decision_text,
+                        confidence=0.90,
+                        participants=sender,
+                        timestamp=msg_date,
+                        source_excerpt=text[:250]
+                    )
+                    db.add(dec)
+                    decisions_found.append(dec)
+                    break
+        else:
+            decisions_found.append(existing_dec)
 
         # 4. Commitments
-        for pat in COMMITMENT_PATTERNS:
-            m = pat.search(text)
-            if m:
-                comm_text = m.group(1).strip()
-                due_date = resolve_relative_date(text, msg_date)
-                comm = Commitment(
-                    conversation_id=message.conversation_id,
-                    message_id=message.id,
-                    person_name=sender,
-                    commitment_text=comm_text[:200],
-                    expected_date=due_date,
-                    source_excerpt=text[:250]
-                )
-                db.add(comm)
-                commitments_found.append(comm)
-                break
+        existing_comm = db.query(Commitment).filter(Commitment.message_id == message.id).first()
+        if not existing_comm:
+            for pat in COMMITMENT_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    comm_text = m.group(1).strip()
+                    due_date = resolve_relative_date(text, msg_date)
+                    comm = Commitment(
+                        conversation_id=message.conversation_id,
+                        message_id=message.id,
+                        person_name=sender,
+                        commitment_text=comm_text[:200],
+                        expected_date=due_date,
+                        source_excerpt=text[:250]
+                    )
+                    db.add(comm)
+                    commitments_found.append(comm)
+                    break
+        else:
+            commitments_found.append(existing_comm)
 
         # 5. Ideas
-        for pat in IDEA_PATTERNS:
-            m = pat.search(text)
-            if m:
-                idea_text = m.group(1).strip()
-                idea = Idea(
-                    conversation_id=message.conversation_id,
-                    message_id=message.id,
-                    title=idea_text[:80],
-                    description=text,
-                    source_excerpt=text[:250]
-                )
-                db.add(idea)
-                ideas_found.append(idea)
-                break
+        existing_idea = db.query(Idea).filter(Idea.message_id == message.id).first()
+        if not existing_idea:
+            for pat in IDEA_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    idea_text = m.group(1).strip()
+                    idea = Idea(
+                        conversation_id=message.conversation_id,
+                        message_id=message.id,
+                        title=idea_text[:80],
+                        description=text,
+                        source_excerpt=text[:250]
+                    )
+                    db.add(idea)
+                    ideas_found.append(idea)
+                    break
+        else:
+            ideas_found.append(existing_idea)
 
         db.commit()
 

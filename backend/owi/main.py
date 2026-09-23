@@ -90,7 +90,20 @@ if frontend_dist.exists() and (frontend_dist / "index.html").exists():
 
     @app.get("/{full_path:path}")
     def serve_frontend_spa(full_path: str):
-        target = frontend_dist / full_path
+        # Reject traversal attempts
+        if ".." in full_path or full_path.startswith("/") or full_path.startswith("\\"):
+            raise HTTPException(status_code=403, detail="Access denied: invalid path")
+        
+        try:
+            target = (frontend_dist / full_path).resolve()
+            resolved_dist = frontend_dist.resolve()
+            if not (target == resolved_dist or resolved_dist in target.parents):
+                raise HTTPException(status_code=403, detail="Access denied: path traversal detected")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid path request")
+
         if full_path and target.is_file():
             return FileResponse(target)
         return FileResponse(frontend_dist / "index.html")

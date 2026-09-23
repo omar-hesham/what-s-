@@ -200,7 +200,7 @@ def is_allowed_host(host_header: Optional[str]) -> bool:
     )
 
 def is_allowed_origin(origin_header: Optional[str]) -> bool:
-    """Validate Origin for CORS and state-changing requests."""
+    """Validate Origin for CORS and state-changing requests, allowing local loopback and paired browser extensions."""
     if not origin_header:
         return True  # Native/Same-origin requests or tools like curl/pytest
     origin_lower = origin_header.lower()
@@ -208,6 +208,8 @@ def is_allowed_origin(origin_header: Optional[str]) -> bool:
         origin_lower.startswith("http://127.0.0.1:") 
         or origin_lower.startswith("http://localhost:")
         or origin_lower in ("http://127.0.0.1", "http://localhost", "http://testserver")
+        or origin_lower.startswith("chrome-extension://")
+        or origin_lower.startswith("moz-extension://")
     )
 
 
@@ -236,33 +238,153 @@ class LocalHostHeaderMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# --- Dynamic, Scoped Companion Pairing Store ---
+
+class PairingManager:
+    """
+    Manages short-lived pairing codes and persistent, revocable companion tokens
+    for the browser extension bridge. Replaces any hard-coded shared secret.
+    """
+    def __init__(self):
+        self._pairing_codes: Dict[str, float] = {}  # code -> expiry
+        self._active_tokens: Dict[str, Dict[str, Any]] = {}  # token -> metadata
+        self._store_file = settings.DATA_DIR / "companion_pairings.json"
+        self._load_store()
+
+    def _load_store(self):
+        if self._store_file.exists():
+            try:
+                import json
+                with open(self._store_file, "r", encoding="utf-8") as f:
+                    self._active_tokens = json.load(f)
+            except Exception as e:
+                self._active_tokens = {}
+
+    def _persist_store(self):
+        try:
+            import json
+            settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with open(self._store_file, "w", encoding="utf-8") as f:
+                json.dump(self._active_tokens, f, indent=2)
+        except Exception:
+            pass
+
+    def create_pairing_code(self) -> Dict[str, Any]:
+        """Generate a user-visible 6-digit pairing code valid for 5 minutes."""
+        code = f"{secrets.randbelow(900000) + 100000}"
+        self._pairing_codes[code] = time.time() + 300  # 5 minutes
+        return {
+            "code": code,
+            "pairing_code": code,
+            "expires_in_seconds": 300
+        }
+
+    def exchange_pairing_code(self, code: str, client_name: str = "WhatsApp Web Companion") -> Optional[str]:
+        """Exchange a valid pairing code for a persistent revocable companion token."""
+        now = time.time()
+        expiry = self._pairing_codes.pop(code.strip(), None)
+        if not expiry or now > expiry:
+            return None
+        
+        token = f"owi_pair_{secrets.token_hex(24)}"
+        self._active_tokens[token] = {
+            "client_name": client_name,
+            "created_at": now,
+            "last_used_at": now,
+            "active": True
+        }
+        self._persist_store()
+        return token
+
+    def is_valid_companion_token(self, token: Optional[str]) -> bool:
+        if not token:
+            return False
+        # Remove Bearer prefix if passed as Authorization header
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+            
+        record = self._active_tokens.get(token)
+        if record and record.get("active", False):
+            record["last_used_at"] = time.time()
+            return True
+        return False
+
+    def revoke_token(self, token_prefix: str) -> bool:
+        found = False
+        for tok in list(self._active_tokens.keys()):
+            if tok.startswith(token_prefix):
+                self._active_tokens[tok]["active"] = False
+                found = True
+        if found:
+            self._persist_store()
+        return found
+
+    def list_pairings(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "token_preview": f"{tok[:12]}...{tok[-4:]}",
+                "client_name": data.get("client_name"),
+                "created_at": data.get("created_at"),
+                "last_used_at": data.get("last_used_at"),
+                "active": data.get("active", False)
+            }
+            for tok, data in self._active_tokens.items()
+        ]
+
+pairing_manager = PairingManager()
+
+
 # --- Companion & Session Authentication Dependencies ---
 
-async def verify_companion_token(api_key: str = Security(api_key_header)) -> bool:
+async def verify_companion_token(request: Request, api_key: Optional[str] = Security(api_key_header)) -> bool:
     """
     Verify bearer / header token for WhatsApp Web companion extension bridge.
     Protects localhost API from arbitrary browser pages.
+    Accepts:
+    - X-OWI-Token header
+    - Authorization: Bearer <token>
     """
-    if not api_key or api_key != settings.COMPANION_SECRET_KEY:
+    token = api_key
+    if not token:
+        auth = request.headers.get("authorization")
+        if auth:
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else auth
+
+    if not token or not pairing_manager.is_valid_companion_token(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing OWI Companion security token.",
+            detail="Invalid or missing OWI Companion pairing token.",
         )
     return True
 
 async def verify_session_or_token(request: Request, api_key: Optional[str] = Security(api_key_header)) -> bool:
     """
-    Accepts either:
+    Enforces real authentication. Accepts:
     1. Valid HttpOnly `owi_session` cookie
-    2. Valid companion / API header token `X-OWI-Token`
+    2. Valid companion / API header token `X-OWI-Token` (or Authorization: Bearer ...)
+    3. Explicit local test bypass mode when OWI_TEST_AUTH_BYPASS is set in environment.
     """
+    # 1. Check HttpOnly session cookie
     cookie_session = request.cookies.get("owi_session")
     if cookie_session and session_manager.is_valid_session(cookie_session):
         return True
     
-    if api_key and api_key == settings.COMPANION_SECRET_KEY:
+    # 2. Check X-OWI-Token header
+    if api_key and pairing_manager.is_valid_companion_token(api_key):
         return True
 
-    # In local development / test client mode, allow if no strict auth header is required
-    return True
+    # 3. Check Authorization header
+    auth_header = request.headers.get("authorization")
+    if auth_header and pairing_manager.is_valid_companion_token(auth_header):
+        return True
+
+    # 4. Explicit test mode bypass for isolated unit tests
+    if os.environ.get("OWI_TEST_AUTH_BYPASS") == "1":
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required. Please authenticate via session or paired companion token."
+    )
+
 

@@ -9,6 +9,8 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from owi.core.logging import logger
+from owi.config import settings
+from owi.ai.gemini_service import GeminiService
 from owi.db.models import (
     Message, Conversation, Task, WaitingFor, Decision, Property, MediaAsset, Transcript
 )
@@ -134,7 +136,10 @@ class AskWhatsAppEngine:
                 res = db.execute(sql, {"query": fts_query_str}).fetchall()
                 msg_ids = [r[0] for r in res]
                 if msg_ids:
-                    fts_messages = db.query(Message).filter(Message.id.in_(msg_ids)).all()
+                    msg_q = db.query(Message).filter(Message.id.in_(msg_ids))
+                    if conversation_id:
+                        msg_q = msg_q.filter(Message.conversation_id == conversation_id)
+                    fts_messages = msg_q.all()
             except Exception as e:
                 logger.warning(f"FTS search notice: {e}")
 
@@ -166,6 +171,36 @@ class AskWhatsAppEngine:
                 "content": m.content,
                 "message_type": m.message_type
             })
+
+        if GeminiService.is_configured():
+            try:
+                evidence_context = "\n".join([
+                    f"[{m.sender_name} في {m.timestamp.strftime('%Y-%m-%d %H:%M')}]: {m.content}"
+                    for m in retrieved_messages
+                ])
+                prompt = (
+                    f"أنت مساعد ذكي لتطبيق Omar WhatsApp Intelligence (OWI).\n"
+                    f"أجب عن سؤال المستخدم بدقة وبناءً فقط على الأدلة المقتبسة التالية من محادثات الواتساب:\n\n"
+                    f"{evidence_context}\n\n"
+                    f"سؤال المستخدم: {query}\n\n"
+                    f"القواعد:\n"
+                    f"1. لا تخترع أي معلومة غير موجودة في الأدلة المقتبسة أعلاه.\n"
+                    f"2. أجب باللغة العربية الواضحة والمباشرة وبلهجة ودية ومهنية.\n"
+                    f"3. اذكر اسم الشخص أو التوقيت عند ذكر أي معلومة أو قرار أو مهمة."
+                )
+                client = GeminiService.get_client()
+                response = client.models.generate_content(
+                    model=settings.GEMINI_MODEL,
+                    contents=prompt
+                )
+                if response.text and response.text.strip():
+                    return {
+                        "answer": response.text.strip(),
+                        "citations": citations,
+                        "powered_by": "Gemini 2.5 Flash (Grounded on local records)"
+                    }
+            except Exception as e:
+                logger.warning(f"Gemini RAG synthesis fallback to direct citations: {e}")
 
         answer = "\n".join(lines)
         return {

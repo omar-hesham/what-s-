@@ -6,7 +6,7 @@ Works without requiring external cloud vector databases or mandatory GPU.
 
 import math
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from owi.core.logging import logger
@@ -81,7 +81,8 @@ class LocalEmbeddingEngine:
         query: str, 
         db: Session, 
         limit: int = 10,
-        conversation_id: int = None
+        conversation_id: Optional[int] = None,
+        max_scan: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Rank messages by semantic vector similarity to query.
@@ -91,7 +92,10 @@ class LocalEmbeddingEngine:
         q = db.query(Message)
         if conversation_id:
             q = q.filter(Message.conversation_id == conversation_id)
-        messages = q.order_by(Message.timestamp.desc()).limit(200).all()
+        q = q.order_by(Message.timestamp.desc())
+        if max_scan:
+            q = q.limit(max_scan)
+        messages = q.all()
 
         results = []
         for msg in messages:

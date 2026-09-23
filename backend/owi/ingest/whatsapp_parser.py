@@ -71,10 +71,34 @@ def clean_bidi(text: str) -> str:
     """Strip Unicode bidirectional markers and replace narrow spaces."""
     return BIDI_CHARS.sub(" ", text).strip()
 
-def parse_date_time(date_str: str, time_str: str) -> datetime:
+def infer_file_date_order(lines: List[str]) -> Tuple[bool, bool]:
     """
-    Intelligently parse date and time strings across international formats.
-    Handles DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, 12h and 24h with AM/PM (or Arabic ص/م).
+    Scan all timestamp lines in a file to infer date order consistently:
+    Returns: (day_first: bool, is_ambiguous: bool)
+    - If any timestamp has part1 > 12, day_first = True (DD/MM) confirmed.
+    - If any timestamp has part2 > 12, day_first = False (MM/DD) confirmed.
+    - If all parts <= 12, defaults to day_first = True (international standard) with is_ambiguous = True.
+    """
+    for line in lines:
+        cleaned = clean_bidi(line)
+        m = IOS_PATTERN.match(cleaned) or ANDROID_PATTERN.match(cleaned)
+        if m:
+            date_str = clean_bidi(m.group("date")).replace(".", "/").replace("-", "/")
+            parts = [int(p) for p in date_str.split("/") if p.isdigit()]
+            if len(parts) == 3:
+                p1, p2 = parts[0], parts[1]
+                if p1 > 1000:
+                    continue  # YYYY/MM/DD
+                if p1 > 12 and p2 <= 12:
+                    return True, False  # Confirmed DD/MM
+                if p2 > 12 and p1 <= 12:
+                    return False, False  # Confirmed MM/DD
+    return True, True  # Default to DD/MM with ambiguity flag
+
+def parse_date_time(date_str: str, time_str: str, day_first: bool = True) -> datetime:
+    """
+    Intelligently parse date and time strings across international formats,
+    using file-level inferred day_first setting.
     """
     date_str = clean_bidi(date_str).replace(".", "/").replace("-", "/")
     time_str = clean_bidi(time_str).replace("  ", " ")
@@ -97,14 +121,16 @@ def parse_date_time(date_str: str, time_str: str) -> datetime:
     else:
         # p3 is year
         year = p3 if p3 > 100 else (2000 + p3 if p3 < 70 else 1900 + p3)
-        # If p1 > 12, it must be DD/MM/YYYY
         if p1 > 12:
             day, month = p1, p2
         elif p2 > 12:
             month, day = p1, p2
         else:
-            # Default to DD/MM/YYYY for international WhatsApp standard
-            day, month = p1, p2
+            # Use file-level inferred day_first
+            if day_first:
+                day, month = p1, p2
+            else:
+                month, day = p1, p2
 
     # Clean time string and parse
     time_str = time_str.strip()
@@ -147,6 +173,8 @@ class WhatsAppParser:
     @classmethod
     def parse_chat_text(cls, chat_text: str) -> List[ParsedMessage]:
         lines = chat_text.splitlines()
+        day_first, is_ambiguous = infer_file_date_order(lines)
+        
         parsed_messages: List[ParsedMessage] = []
         current_msg: Optional[ParsedMessage] = None
         source_idx = 0
@@ -162,23 +190,33 @@ class WhatsAppParser:
             match = IOS_PATTERN.match(cleaned_line) or ANDROID_PATTERN.match(cleaned_line)
             
             if match:
-                # Save previous message
-                if current_msg:
-                    parsed_messages.append(current_msg)
-                    current_msg = None
-
                 date_part = match.group("date")
                 time_part = match.group("time")
                 rest_part = match.group("rest").strip()
 
                 try:
-                    dt = parse_date_time(date_part, time_part)
+                    dt = parse_date_time(date_part, time_part, day_first=day_first)
                 except Exception:
-                    # If date parsing fails, treat as multiline continuation
+                    # Date parsing failed: preserve source span and do not drop text
                     if current_msg:
                         current_msg.content += "\n" + line_stripped
                         current_msg.raw_text += "\n" + line
+                    else:
+                        source_idx += 1
+                        current_msg = ParsedMessage(
+                            source_index=source_idx,
+                            timestamp=datetime.utcnow(),
+                            sender_name="System",
+                            content=line_stripped,
+                            message_type="unparsed",
+                            raw_text=line
+                        )
                     continue
+
+                # Save previous message
+                if current_msg:
+                    parsed_messages.append(current_msg)
+                    current_msg = None
 
                 source_idx += 1
 

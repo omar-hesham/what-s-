@@ -20,6 +20,7 @@ frontend/node_modules/
 
 # Private user data & WhatsApp media (Data Sovereignty)
 data/owi.db*
+data/companion_pairings*.json
 data/media/*
 !data/media/.gitkeep
 data/sources/*

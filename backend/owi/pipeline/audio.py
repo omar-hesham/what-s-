@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 
 from owi.config import settings
 from owi.core.logging import logger
-from owi.db.models import MediaAsset, Transcript, TranscriptSegment
+from owi.db.models import MediaAsset, Transcript, TranscriptSegment, Message
+from owi.db.migrations import sync_message_fts
+from owi.ai.gemini_service import GeminiService
 
 class AudioTranscriber:
     """Manages local Whisper transcription."""
@@ -119,9 +121,29 @@ class AudioTranscriber:
             except Exception as e:
                 logger.error(f"Error during model transcription: {e}")
                 full_text = f"[Transcription failed: {e}]"
+        elif GeminiService.is_configured():
+            logger.info("Local Whisper not available; transcribing voice note with Gemini Multimodal Audio...")
+            gemini_res = GeminiService.transcribe_audio(audio_path)
+            if gemini_res.get("success") and gemini_res.get("text"):
+                full_text = gemini_res["text"]
+                chosen_model = gemini_res.get("model", "gemini-2.5-flash")
+                segments_data.append({
+                    "start_time": 0.0,
+                    "end_time": max(duration, 3.0),
+                    "text": full_text,
+                    "speaker": asset.message.sender_name if asset.message else "Speaker"
+                })
+            else:
+                logger.warning(f"Gemini transcription notice: {gemini_res.get('error')}")
+                full_text = f"تسجيل صوتي من {asset.message.sender_name if asset.message else 'المستخدم'}."
+                segments_data.append({
+                    "start_time": 0.0,
+                    "end_time": max(duration, 3.0),
+                    "text": full_text,
+                    "speaker": asset.message.sender_name if asset.message else "Speaker"
+                })
         else:
-            # Fallback when Whisper binary wheel is not installed
-            # Provides a graceful offline placeholder with mock segments based on file duration
+            # Fallback when Whisper binary wheel is not installed and Gemini is not configured
             logger.info("Generating offline placeholder transcription for audio asset.")
             full_text = f"تسجيل صوتي من {asset.message.sender_name if asset.message else 'المستخدم'} - تم حفظ الملف الصوتي الأصلي بنجاح."
             segments_data.append({
@@ -156,6 +178,14 @@ class AudioTranscriber:
                 speaker=seg.get("speaker")
             )
             db.add(s_rec)
+
+        # Sync transcript into message and FTS if linked
+        if asset.message_id and full_text:
+            msg = db.query(Message).filter(Message.id == asset.message_id).first()
+            if msg:
+                if not msg.content or "<" in msg.content or "[" in msg.content:
+                    msg.content = full_text
+                sync_message_fts(db.connection(), msg.id, msg.content, msg.sender_name or "")
 
         db.commit()
 

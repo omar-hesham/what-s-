@@ -6,8 +6,11 @@ computes cryptographic hashes for deduplication, and records relational entities
 
 import shutil
 import tempfile
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from owi.config import settings
@@ -20,10 +23,11 @@ from owi.ingest.whatsapp_parser import WhatsAppParser, ParsedMessage, detect_att
 
 def find_chat_file(extracted_dir: Path) -> Optional[Path]:
     """Find the main WhatsApp text export file inside extracted directory."""
-    # Look for _chat.txt or any *.txt file
-    candidates = list(extracted_dir.glob("**/_chat.txt"))
-    if candidates:
-        return candidates[0]
+    # Look for _chat.txt or chat.txt first
+    for exact_name in ("_chat.txt", "chat.txt"):
+        candidates = list(extracted_dir.glob(f"**/{exact_name}"))
+        if candidates:
+            return candidates[0]
     txt_files = list(extracted_dir.glob("**/*.txt"))
     if txt_files:
         # Prefer the largest text file or one containing 'chat' in name
@@ -32,6 +36,25 @@ def find_chat_file(extracted_dir: Path) -> Optional[Path]:
                 return f
         return max(txt_files, key=lambda f: f.stat().st_size)
     return None
+
+def is_binary_payload(file_path: Path) -> bool:
+    """Check if a file cannot be decoded as text in any standard text encoding or contains null bytes."""
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(8192)
+            if not chunk:
+                return False
+            for enc in ("utf-8", "utf-8-sig", "utf-16", "cp1256", "latin-1"):
+                try:
+                    text_content = chunk.decode(enc)
+                    if "\x00" in text_content:
+                        return True
+                    return False
+                except UnicodeDecodeError:
+                    continue
+            return True
+    except Exception:
+        return True
 
 class ZipImporter:
     """Safely ingests WhatsApp ZIP archives containing chats and media."""
@@ -42,8 +65,16 @@ class ZipImporter:
         zip_path: Path, 
         db: Session, 
         conversation_title: Optional[str] = None,
-        force_reimport: bool = False
+        force_reimport: bool = False,
+        merge_into_conversation_id: Optional[int] = None
     ) -> Dict[str, Any]:
+        if merge_into_conversation_id is not None:
+            return cls.merge_zip(
+                zip_path=zip_path,
+                db=db,
+                target_conversation_id=merge_into_conversation_id
+            )
+
         zip_path = Path(zip_path)
         if not zip_path.exists():
             raise FileNotFoundError(f"ZIP file not found: {zip_path}")
@@ -203,4 +234,189 @@ class ZipImporter:
 
         finally:
             # Clean up temporary extraction folder
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+    @classmethod
+    def merge_zip(
+        cls,
+        zip_path: Path,
+        db: Session,
+        target_conversation_id: int
+    ) -> Dict[str, Any]:
+        """
+        Merge a WhatsApp text export ZIP into an existing conversation.
+        Preserves target conversation identity, title, source_hash, and existing messages/derived records.
+        Rejects archives containing physical media files before any database writes.
+        Deduplicates messages using (timestamp, sender_name, content) with multiplicity tracking.
+        Updates message_count and date range from actual rows and maintains SQLite FTS5 search index.
+        """
+        zip_path = Path(zip_path)
+        if not zip_path.exists():
+            raise FileNotFoundError(f"ZIP file not found: {zip_path}")
+
+        target_conv = db.query(Conversation).filter(Conversation.id == target_conversation_id).first()
+        if not target_conv:
+            raise ValueError(f"Target conversation {target_conversation_id} not found.")
+
+        temp_extract_dir = Path(tempfile.mkdtemp(prefix="owi_zip_merge_"))
+        try:
+            extracted_files, errors = safe_extract_zip(zip_path, temp_extract_dir)
+            if errors:
+                logger.warning(f"ZIP extraction had warnings during merge: {errors}")
+
+            chat_file = find_chat_file(temp_extract_dir)
+            if not chat_file:
+                raise ValueError("No valid WhatsApp text file found in the ZIP archive.")
+
+            # Reject physical media files or unknown binary payloads before performing any database write.
+            # Allow and ignore inert text sidecars such as .md, .markdown, and other .txt entries without interpreting their contents.
+            inert_text_extensions = {".md", ".markdown", ".txt"}
+            ignored_filenames = {".ds_store", "thumbs.db", "desktop.ini"}
+
+            unsupported_files: List[Path] = []
+            for f in extracted_files:
+                if f == chat_file:
+                    continue
+                if (
+                    f.name.startswith((".", "._", "__"))
+                    or f.name.lower() in ignored_filenames
+                    or any(part.startswith((".", "._", "__")) for part in f.parts)
+                ):
+                    continue
+
+                ext = f.suffix.lower()
+                if ext in inert_text_extensions:
+                    if is_binary_payload(f):
+                        unsupported_files.append(f)
+                    else:
+                        # Allow and ignore inert text sidecar without interpreting contents
+                        continue
+                else:
+                    # Actual physical media or unknown binary payload
+                    unsupported_files.append(f)
+
+            if unsupported_files:
+                media_names = [f.name for f in unsupported_files]
+                raise ValueError(
+                    f"Merge mode does not support ZIP archives with physical media files or binary payloads "
+                    f"({len(unsupported_files)} files found: {', '.join(media_names[:5])}"
+                    f"{'...' if len(media_names) > 5 else ''}). "
+                    f"Please provide a text-only export without media."
+                )
+
+            # Read chat content (try UTF-8, then fallback to utf-8-sig or latin-1)
+            raw_text = ""
+            for encoding in ("utf-8", "utf-8-sig", "utf-16", "cp1256", "latin-1"):
+                try:
+                    with open(chat_file, "r", encoding=encoding) as f:
+                        raw_text = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if not raw_text:
+                raise ValueError("Could not read text content from chat export file.")
+
+            parsed_messages = WhatsAppParser.parse_chat_text(raw_text)
+            if not parsed_messages:
+                raise ValueError("No valid messages could be parsed from the chat file.")
+
+            # Establish duplicate identity with multiplicity on existing messages
+            existing_messages = (
+                db.query(Message)
+                .filter(Message.conversation_id == target_conv.id)
+                .order_by(Message.timestamp.asc(), Message.id.asc())
+                .all()
+            )
+
+            def _msg_key(ts: Optional[datetime], sender: Optional[str], content: Optional[str]) -> Tuple[Optional[datetime], str, str]:
+                t = ts
+                if t is not None:
+                    if t.tzinfo is not None:
+                        t = t.replace(tzinfo=None)
+                    t = t.replace(microsecond=0)
+                s = (sender or "").strip()
+                c = (content or "").replace("\r\n", "\n").strip()
+                return (t, s, c)
+
+            existing_counts = Counter(
+                _msg_key(m.timestamp, m.sender_name, m.content)
+                for m in existing_messages
+            )
+
+            max_source_index = max((m.source_index for m in existing_messages if m.source_index is not None), default=0)
+            participants_seen = set()
+            messages_added = 0
+            messages_skipped = 0
+
+            for pmsg in parsed_messages:
+                key = _msg_key(pmsg.timestamp, pmsg.sender_name, pmsg.content)
+                if existing_counts[key] > 0:
+                    existing_counts[key] -= 1
+                    messages_skipped += 1
+                    continue
+
+                # Add new message
+                if pmsg.sender_name not in ("System", "Unknown") and pmsg.sender_name not in participants_seen:
+                    participants_seen.add(pmsg.sender_name)
+                    existing_p = db.query(Participant).filter(Participant.name == pmsg.sender_name).first()
+                    if not existing_p:
+                        p_rec = Participant(
+                            name=pmsg.sender_name,
+                            normalized_name=pmsg.sender_name.strip().lower()
+                        )
+                        db.add(p_rec)
+
+                source_idx = pmsg.source_index
+                if source_idx is None or source_idx <= max_source_index:
+                    source_idx = max_source_index + messages_added + 1
+
+                msg_rec = Message(
+                    conversation_id=target_conv.id,
+                    sender_name=pmsg.sender_name,
+                    timestamp=pmsg.timestamp,
+                    content=pmsg.content,
+                    message_type=pmsg.message_type,
+                    raw_text=pmsg.raw_text,
+                    has_attachment=pmsg.has_attachment,
+                    attachment_name=pmsg.attachment_name,
+                    source_index=source_idx
+                )
+                db.add(msg_rec)
+                db.flush()
+                messages_added += 1
+
+                # Maintain SQLite FTS5 search index for inserted messages
+                sync_message_fts(db.connection(), msg_rec.id, msg_rec.content or "", msg_rec.sender_name or "")
+
+            # Recalculate message_count and date range from actual rows
+            actual_count = db.query(Message).filter(Message.conversation_id == target_conv.id).count()
+            actual_start = db.query(func.min(Message.timestamp)).filter(Message.conversation_id == target_conv.id).scalar()
+            actual_end = db.query(func.max(Message.timestamp)).filter(Message.conversation_id == target_conv.id).scalar()
+
+            target_conv.message_count = actual_count
+            target_conv.start_date = actual_start
+            target_conv.end_date = actual_end
+            target_conv.updated_at = datetime.utcnow()
+
+            db.commit()
+            db.refresh(target_conv)
+
+            logger.info(
+                f"Merged archive into Conversation #{target_conv.id}: "
+                f"{messages_added} added, {messages_skipped} skipped, total {actual_count} messages."
+            )
+
+            return {
+                "status": "success",
+                "mode": "merge",
+                "conversation_id": target_conv.id,
+                "title": target_conv.title,
+                "messages_imported": messages_added,
+                "messages_added": messages_added,
+                "messages_skipped": messages_skipped,
+                "total_messages": actual_count,
+                "duplicate": (messages_added == 0)
+            }
+        finally:
             shutil.rmtree(temp_extract_dir, ignore_errors=True)

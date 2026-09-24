@@ -153,9 +153,15 @@ async def import_text_export(
 async def import_zip_export(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
+    merge_into_conversation_id: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
-    """Import a WhatsApp exported ZIP archive containing chat and media."""
+    """Import a WhatsApp exported ZIP archive containing chat and media, or merge text export into an existing conversation."""
+    if merge_into_conversation_id is not None:
+        target = db.query(Conversation).filter(Conversation.id == merge_into_conversation_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail=f"Target conversation {merge_into_conversation_id} not found.")
+
     # Write to a safe temporary file
     temp_zip = Path(tempfile.mktemp(suffix=".zip"))
     try:
@@ -163,10 +169,18 @@ async def import_zip_export(
             while chunk := await file.read(65536):
                 f.write(chunk)
 
-        result = ZipImporter.import_zip(temp_zip, db, conversation_title=title)
+        try:
+            result = ZipImporter.import_zip(
+                temp_zip,
+                db,
+                conversation_title=title,
+                merge_into_conversation_id=merge_into_conversation_id
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         
-        # Trigger analysis if imported
-        if result.get("status") == "success" and "conversation_id" in result:
+        # Trigger analysis if imported fresh (not in merge mode)
+        if merge_into_conversation_id is None and result.get("status") == "success" and "conversation_id" in result:
             cid = result["conversation_id"]
             LocalNLPEngine.analyze_conversation(cid, db)
             PropertyStoneEngine.extract_from_conversation(cid, db)

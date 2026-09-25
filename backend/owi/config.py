@@ -4,6 +4,7 @@ All configuration defaults to local-first, zero-cost, and privacy-conscious sett
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Literal, Optional
 from dotenv import load_dotenv
@@ -12,11 +13,21 @@ from pydantic_settings import BaseSettings
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 WORKSPACE_DIR = BASE_DIR.parent
-DEFAULT_DATA_DIR = WORKSPACE_DIR / "data"
+DEFAULT_DATA_DIR = Path(os.getenv("OWI_DEFAULT_DATA_DIR", WORKSPACE_DIR / "data"))
 
-# Automatically load local .env from workspace or backend directory
-load_dotenv(WORKSPACE_DIR / ".env")
-load_dotenv(BASE_DIR / ".env")
+# Automatically load local .env from workspace or backend directory if not disabled
+if os.getenv("PYTHON_DOTENV_DISABLED") != "1":
+    load_dotenv(WORKSPACE_DIR / ".env")
+    load_dotenv(BASE_DIR / ".env")
+
+if "OWI_DATA_DIR" in os.environ and not os.environ["OWI_DATA_DIR"].strip():
+    del os.environ["OWI_DATA_DIR"]
+
+# Safety guard: Never let test runners target DEFAULT_DATA_DIR
+if ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules) and "OWI_DATA_DIR" not in os.environ:
+    import tempfile
+    os.environ["OWI_DATA_DIR"] = tempfile.mkdtemp(prefix="owi_test_safety_")
+
 
 class Settings(BaseSettings):
     # Application identity
@@ -90,4 +101,8 @@ class Settings(BaseSettings):
         return f"sqlite:///{db_path}"
 
 settings = Settings()
-settings.init_directories()
+if not os.getenv("PYTEST_CURRENT_TEST") and os.getenv("PYTHON_DOTENV_DISABLED") != "1":
+    try:
+        settings.init_directories()
+    except Exception:
+        pass

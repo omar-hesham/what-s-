@@ -79,6 +79,7 @@ class Message(Base):
     has_attachment = Column(Boolean, default=False)
     attachment_name = Column(String(255), nullable=True)
     source_index = Column(Integer, default=0)
+    timestamp_provenance = Column(String(50), default="verified", nullable=True)  # verified, unverified_fallback
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

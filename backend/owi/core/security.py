@@ -248,8 +248,11 @@ class PairingManager:
     def __init__(self):
         self._pairing_codes: Dict[str, float] = {}  # code -> expiry
         self._active_tokens: Dict[str, Dict[str, Any]] = {}  # token -> metadata
-        self._store_file = settings.DATA_DIR / "companion_pairings.json"
         self._load_store()
+
+    @property
+    def _store_file(self) -> Path:
+        return settings.DATA_DIR / "companion_pairings.json"
 
     def _load_store(self):
         if self._store_file.exists():

@@ -21,6 +21,12 @@ def init_db():
                     conn.execute(text("ALTER TABLE jobs ADD COLUMN attempts INTEGER DEFAULT 0;"))
                 if "lease_expires_at" not in existing_cols:
                     conn.execute(text("ALTER TABLE jobs ADD COLUMN lease_expires_at DATETIME;"))
+
+            res_msg = conn.execute(text("PRAGMA table_info(messages);"))
+            existing_msg_cols = {row[1] for row in res_msg.fetchall()}
+            if existing_msg_cols and "timestamp_provenance" not in existing_msg_cols:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN timestamp_provenance VARCHAR(50) DEFAULT 'verified';"))
+
             conn.commit()
         except Exception as e:
             logger.warning(f"Column migration notice: {e}")

@@ -29,9 +29,10 @@ from owi.core.security import (
     sanitize_filename
 )
 from owi.core.logging import logger
-from owi.db.database import get_db
-from owi.db.models import Conversation, Message, MediaAsset, AttachmentRecord
+from owi.db.database import get_db, SessionLocal
+from owi.db.models import Conversation, Message, MediaAsset, AttachmentRecord, Job
 from owi.ai.local_nlp import LocalNLPEngine
+from owi.core.queue import enqueue_media_processing, job_queue
 
 router = APIRouter(prefix="/api/companion", tags=["WhatsApp Web Companion"])
 
@@ -442,6 +443,88 @@ def record_attachment_status(
     db.add(rec)
     db.flush()
     return rec
+
+# --- Capture Session Management & Cancellation Tracking ---
+_cancelled_capture_sessions: Set[str] = set()
+
+def is_capture_session_cancelled(session_id: Optional[str]) -> bool:
+    """Check if a capture session has been flagged as cancelled to stop new capture/enqueue work."""
+    if not session_id:
+        return False
+    return session_id in _cancelled_capture_sessions
+
+def mark_capture_session_cancelled(session_id: str) -> None:
+    """
+    Flag a capture session as cancelled to stop NEW capture and enqueue work.
+    Preserves all already saved originals, attachment records, and queued/completed processing.
+    Already saved originals remain valid and eligible for processing/retry.
+    """
+    if session_id:
+        _cancelled_capture_sessions.add(session_id)
+
+def enqueue_companion_media_asset(
+    asset_id: int,
+    db: Session,
+    session_id: Optional[str] = None
+) -> Optional[int]:
+    """
+    Safely and idempotently enqueues a committed companion MediaAsset for background processing:
+    - Never enqueues previews, unavailable/expired/failed records, or missing files.
+    - Never enqueues before DB transaction is committed (caller must commit first).
+    - Respects capture session cancellation (never enqueues if session was cancelled).
+    - Deduplicates: prevents duplicate processing jobs if already active or completed.
+    - On enqueue failure: preserves saved original and records durable error/status for retry; never rolls back or deletes file.
+    """
+    try:
+        asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
+        if not asset:
+            logger.warning(f"enqueue_companion_media_asset: MediaAsset #{asset_id} not found")
+            return None
+
+        # Guard 1: Physical file must exist on disk
+        if not asset.file_path or not Path(asset.file_path).exists():
+            logger.info(f"MediaAsset #{asset_id} has no valid physical file on disk. Skipping enqueue.")
+            return None
+
+        # Guard 2: Respect capture session cancellation (stop new enqueue work for cancelled sessions)
+        if session_id and is_capture_session_cancelled(session_id):
+            logger.info(f"Capture session '{session_id}' was cancelled. Skipping new enqueue for MediaAsset #{asset_id}.")
+            return None
+
+        # Guard 3: Must have at least one valid 'saved-original' attachment record linked to this asset.
+        # Avoid suppressing a saved-original if another record (e.g. preview-only or unavailable) is also present.
+        saved_rec = db.query(AttachmentRecord).filter(
+            AttachmentRecord.media_asset_id == asset_id,
+            AttachmentRecord.status == "saved-original"
+        ).first()
+        if not saved_rec:
+            logger.info(f"MediaAsset #{asset_id} has no linked 'saved-original' attachment record. Skipping enqueue.")
+            return None
+
+        # Enqueue background processing idempotently
+        job_id = enqueue_media_processing(asset.id, force_retry=False, db=db)
+        return job_id
+    except Exception as e:
+        logger.error(f"Failed to enqueue MediaAsset #{asset_id} for processing: {e}", exc_info=True)
+        # Roll back failed transaction first to clear any broken session state
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # On enqueue failure: preserve saved original & persist durable status for retry
+        try:
+            asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
+            if asset:
+                asset.processing_status = "failed"
+                asset.processing_error = f"enqueue_failed: {str(e)}"
+                db.commit()
+        except Exception as db_err:
+            logger.error(f"Could not persist enqueue failure status on MediaAsset #{asset_id}: {db_err}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return None
 
 YOU_SENDER_ALIASES = {"you", "أنت", "me", "انا", "أنا"}
 
@@ -858,6 +941,10 @@ class MediaDownloadHandoffRequest(BaseModel):
     attachment_status: Optional[str] = "saved-original"
     reason: Optional[str] = None
 
+class CaptureSessionCancelRequest(BaseModel):
+    session_id: str
+    reason: Optional[str] = "cancelled_by_user"
+
 def get_system_downloads_dir() -> Path:
     """
     Resolve the configured system Downloads folder.
@@ -1077,6 +1164,24 @@ def list_available_targets(
         })
     return {"targets": res}
 
+@router.post("/session/cancel")
+@router.post("/cancel")
+def cancel_companion_capture_session(
+    req: CaptureSessionCancelRequest,
+    authenticated: bool = Depends(verify_companion_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Cancel an active capture session to stop new capture/enqueue work.
+    Preserves all already saved originals, attachment records, and queued/completed processing.
+    """
+    mark_capture_session_cancelled(req.session_id)
+    return {
+        "status": "cancelled",
+        "session_id": req.session_id,
+        "reason": req.reason or "cancelled_by_user"
+    }
+
 # --- Media Upload Endpoints (Direct and Chunked Session) ---
 
 def get_media_session_dir() -> Path:
@@ -1231,6 +1336,13 @@ def upload_companion_media_direct(
         logger.error(f"Failed to persist uploaded media: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to persist media asset: {e}")
 
+    # Enqueue background processing idempotently after DB/file transaction is committed
+    job_id = enqueue_companion_media_asset(
+        asset_id=asset.id,
+        db=db,
+        session_id=req.session_id
+    )
+
     return {
         "status": "success",
         "asset_id": asset.id,
@@ -1240,7 +1352,9 @@ def upload_companion_media_direct(
         "category": category,
         "file_size": file_size,
         "sha256": sha,
-        "attachment_status": "saved-original"
+        "attachment_status": "saved-original",
+        "job_id": job_id,
+        "processing_status": asset.processing_status
     }
 
 @router.post("/media/session/start")
@@ -1589,6 +1703,13 @@ def finish_media_upload_session(
 
         shutil.rmtree(session_dir, ignore_errors=True)
 
+        cap_session_id = session_info.get("capture_session_id") or safe_session_id
+        job_id = enqueue_companion_media_asset(
+            asset_id=asset.id,
+            db=db,
+            session_id=cap_session_id
+        )
+
         return {
             "status": "success",
             "asset_id": asset.id,
@@ -1598,7 +1719,9 @@ def finish_media_upload_session(
             "category": category,
             "file_size": total_bytes_written,
             "sha256": computed_sha,
-            "attachment_status": "saved-original"
+            "attachment_status": "saved-original",
+            "job_id": job_id,
+            "processing_status": asset.processing_status
         }
     except Exception as e:
         db.rollback()
@@ -1721,6 +1844,13 @@ def handoff_companion_media_download(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to persist media handoff asset: {e}")
 
+    # Enqueue background processing idempotently after DB/file transaction is committed
+    job_id = enqueue_companion_media_asset(
+        asset_id=asset.id,
+        db=db,
+        session_id=req.session_id
+    )
+
     return {
         "status": "success",
         "asset_id": asset.id,
@@ -1730,7 +1860,9 @@ def handoff_companion_media_download(
         "category": category,
         "file_size": f_size,
         "sha256": sha,
-        "attachment_status": "saved-original"
+        "attachment_status": "saved-original",
+        "job_id": job_id,
+        "processing_status": asset.processing_status
     }
 
 # --- Ingestion Endpoint ---
@@ -1800,6 +1932,7 @@ def ingest_companion_selection(
     day_first = True if not req.date_order else req.date_order.upper().startswith("DD")
 
     touched_message_ids = []
+    candidate_asset_ids_to_enqueue: List[int] = []
 
     for m in req.messages:
         parsed_dt = parse_companion_timestamp(m.timestamp, default_day_first=day_first)
@@ -1887,6 +2020,7 @@ def ingest_companion_selection(
                             target_msg.attachment_name = prec.file_name or asset.file_name
                         target_msg.attachment_status = "saved-original"
                         prec.status = "saved-original"
+                        candidate_asset_ids_to_enqueue.append(asset.id)
                     else:
                         prec.status = "failed"
                         prec.reason = "missing_physical_file"
@@ -1911,6 +2045,7 @@ def ingest_companion_selection(
                             target_msg.attachment_name = matching_rec.file_name or ua.file_name
                         target_msg.attachment_status = "saved-original"
                         matching_rec.status = "saved-original"
+                        candidate_asset_ids_to_enqueue.append(ua.id)
                     db.flush()
 
         has_media_content = m.has_media or bool(m.media_base64) or bool(m.attachments)
@@ -1955,6 +2090,8 @@ def ingest_companion_selection(
                         )
                         asset_id = asset.id
                         att_item_status = "saved-original"
+                        if Path(f_path).exists():
+                            candidate_asset_ids_to_enqueue.append(asset.id)
                     except Exception as e:
                         logger.warning(f"Could not store multi-attachment media: {e}")
                         att_item_status = "failed"
@@ -1987,6 +2124,7 @@ def ingest_companion_selection(
                         sha_val = existing_asset.sha256_hash
                         f_size = existing_asset.file_size
                         att_item_status = "saved-original"
+                        candidate_asset_ids_to_enqueue.append(existing_asset.id)
                     else:
                         if att_item_status == "saved-original":
                             att_item_status = "failed"
@@ -2049,6 +2187,8 @@ def ingest_companion_selection(
                     media_asset_id=asset.id
                 )
                 target_msg.attachment_status = "saved-original"
+                if Path(f_path).exists():
+                    candidate_asset_ids_to_enqueue.append(asset.id)
             except Exception as e:
                 logger.warning(f"Could not store captured companion media: {e}")
                 record_attachment_status(
@@ -2081,6 +2221,7 @@ def ingest_companion_selection(
                 f_size = existing_asset.file_size
                 sha_val = existing_asset.sha256_hash
                 f_name = orig_name
+                candidate_asset_ids_to_enqueue.append(existing_asset.id)
             else:
                 status_val = m.attachment_status or "preview-only"
                 if status_val == "saved-original":
@@ -2155,6 +2296,24 @@ def ingest_companion_selection(
 
     if added_count > 0:
         LocalNLPEngine.analyze_conversation(conv.id, db)
+
+    # Check for capture session cancellation
+    session_cancelled = False
+    if req.session_id and (
+        req.partial_reason == "cancelled_by_user" or
+        (req.completeness_status or "").lower() in ("cancelled", "cancel")
+    ):
+        mark_capture_session_cancelled(req.session_id)
+        session_cancelled = True
+
+    if not session_cancelled:
+        # Enqueue background processing idempotently after DB/file transaction is committed
+        for aid in dict.fromkeys(candidate_asset_ids_to_enqueue):
+            enqueue_companion_media_asset(
+                asset_id=aid,
+                db=db,
+                session_id=req.session_id
+            )
 
     try:
         clean_detail = req.partial_reason if (req.partial_reason in ALLOWED_STATIC_DETAILS) else "ok"

@@ -5,6 +5,7 @@
   "description": "User-initiated bulk capture companion for Omar WhatsApp Intelligence (OWI). 100% Local & Privacy-Conscious.",
   "permissions": [
     "activeTab",
+    "downloads",
     "storage",
     "tabs"
   ],

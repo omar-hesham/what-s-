@@ -31,6 +31,17 @@
   }
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // 0. Get Active Chat Title
+    if (request.action === "get_active_chat_title") {
+      try {
+        const title = OWIBulkCaptureEngine.extractChatTitle(document);
+        sendResponse({ success: true, chatTitle: title });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+      return true;
+    }
+
     // 1. Get Live State
     if (request.action === "get_capture_state") {
       sendResponse(lastKnownState || { status: "idle" });

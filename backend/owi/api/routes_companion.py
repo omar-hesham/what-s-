@@ -4,6 +4,9 @@ Authenticated bridge for user-initiated browser captures.
 Uses scoped, revocable pairing credentials.
 """
 
+import os
+import sys
+import time
 import base64
 import hashlib
 import json
@@ -442,6 +445,104 @@ def record_attachment_status(
 
 YOU_SENDER_ALIASES = {"you", "أنت", "me", "انا", "أنا"}
 
+INVALID_CHAT_TITLES = {
+    "profile details",
+    "تفاصيل الملف الشخصي",
+    "contact info",
+    "معلومات جهة الاتصال",
+    "group info",
+    "معلومات المجموعة",
+    "chat details",
+    "تفاصيل الدردشة"
+}
+
+def is_invalid_title(t: Optional[str]) -> bool:
+    if not t:
+        return True
+    cleaned = normalize_digits_and_bidi(t).strip().lower()
+    return cleaned in INVALID_CHAT_TITLES
+
+def extract_title_core_tokens(title: str) -> Set[str]:
+    norm = normalize_digits_and_bidi(title).strip().lower()
+    norm = re.sub(r'\(.*?\)', ' ', norm)
+    norm = re.sub(r'\+?\d[\d\s\-]{6,}\d', ' ', norm)
+    words = re.findall(r'[\w]+', norm, flags=re.UNICODE)
+    filler = {
+        "whatsapp", "chat", "with", "imported", "archive", "export", "zip",
+        "web", "conversation", "محادثة", "مع", "واتساب", "أرشيف", "تصدير",
+        "دردشة", "رسائل", "messages"
+    }
+    core = {w for w in words if w not in filler and not w.isdigit()}
+    return core
+
+def is_matching_chat_title(t1: Optional[str], t2: Optional[str]) -> bool:
+    """
+    Strict title matching with narrow imported archive alias support:
+    1. Exact match (case/whitespace/bidi-normalized).
+    2. Strict group rejection: If one title refers to a group ('group' or 'مجموعة')
+       and the other does not, they are NEVER matched.
+    3. Narrow imported archive alias match:
+       One title is an archive alias of the other, e.g.:
+       - "محادثة H (تعديلات الكتاب)" vs "H"
+       - "WhatsApp Chat with H - 2026 Export" vs "H"
+       - "Imported Archive H" vs "WhatsApp Web H"
+       Specifically:
+       - Strips known archive prefixes ("whatsapp chat with ", "chat with ", "imported archive ", "whatsapp web ", "محادثة مع ", "محادثة ", etc.)
+       - Strips trailing parenthetical notes "(...)" at the end (unless indicating group)
+       - Strips trailing export / archive tags (" - 2026 Export", " - Export", " - Archive", " - تصدير", etc.)
+       The remaining name segment MUST EXACTLY EQUAL the live title (or both alias segments match).
+       Arbitrary subset/shared-token matches (e.g. "H Group" vs "H") are strictly REJECTED.
+    """
+    if not t1 or not t2:
+        return False
+    n1 = normalize_digits_and_bidi(t1).strip().strip('"\'').lower()
+    n2 = normalize_digits_and_bidi(t2).strip().strip('"\'').lower()
+    if n1 == n2:
+        return True
+
+    # Strict: Reject match if one is a group and the other is not
+    group_indicators = ("group", "مجموعة")
+    is_g1 = any(gi in n1 for gi in group_indicators)
+    is_g2 = any(gi in n2 for gi in group_indicators)
+    if is_g1 != is_g2:
+        return False
+
+    def extract_archive_name_segment(title_str: str) -> str:
+        s = normalize_digits_and_bidi(title_str).strip().strip('"\'').lower()
+        # Strip trailing parenthetical notes at end (e.g. (تعديلات الكتاب))
+        s = re.sub(r'\(.*?\)\s*$', '', s).strip()
+        # Strip trailing export / archive tags (e.g. - 2026 Export, - Export, - Archive, - تصدير)
+        s = re.sub(r'\s*[-–—]\s*(?:\d{2,4}\s*)?(?:export|archive|تصدير|أرشيف|backup|نسخة).*$', '', s, flags=re.IGNORECASE).strip()
+        s = re.sub(r'\s*[-–—]\s*(?:export|archive|تصدير|أرشيف|backup|نسخة)(?:\s*\d{2,4})?.*$', '', s, flags=re.IGNORECASE).strip()
+        prefixes = [
+            "whatsapp chat with ", "whatsapp chat - ", "whatsapp chat ",
+            "chat with ", "imported archive ", "archive with ", "archive - ", "archive ",
+            "whatsapp web ",
+            "محادثة مع ", "محادثة ", "دردشة مع ", "دردشة ", "رسائل مع ", "رسائل ",
+            "أرشيف محادثة مع ", "أرشيف محادثة ", "أرشيف دردشة مع ", "أرشيف دردشة ", "أرشيف "
+        ]
+        for pfx in prefixes:
+            if s.startswith(pfx):
+                s = s[len(pfx):].strip()
+                break
+        # Re-check trailing parenthetical / export suffix in case prefix was stripped first
+        s = re.sub(r'\(.*?\)\s*$', '', s).strip()
+        s = re.sub(r'\s*[-–—]\s*(?:\d{2,4}\s*)?(?:export|archive|تصدير|أرشيف|backup|نسخة).*$', '', s, flags=re.IGNORECASE).strip()
+        return s
+
+    seg1 = extract_archive_name_segment(t1)
+    seg2 = extract_archive_name_segment(t2)
+
+    if seg1 and seg1 == n2:
+        return True
+    if seg2 and seg2 == n1:
+        return True
+    if seg1 and seg2 and seg1 == seg2 and (seg1 != n1 or seg2 != n2):
+        return True
+
+    return False
+
+
 def is_matching_sender(s1: str, s2: str) -> bool:
     norm1 = (s1 or "").strip().lower()
     norm2 = (s2 or "").strip().lower()
@@ -740,6 +841,153 @@ class MediaSessionChunkRequest(BaseModel):
 class MediaSessionFinishRequest(BaseModel):
     session_id: str
 
+class MediaDownloadHandoffRequest(BaseModel):
+    download_path: str
+    file_name: str
+    file_type: Optional[str] = "document"
+    mime_type: Optional[str] = "application/octet-stream"
+    conversation_id: Optional[int] = None
+    message_id: Optional[int] = None
+    platform_msg_id: Optional[str] = None
+    message_key: Optional[str] = None
+    attachment_position: Optional[int] = None
+    session_id: Optional[str] = None
+    confirm_target_merge: Optional[bool] = False
+    chat_title: Optional[str] = None
+    sha256: Optional[str] = None
+    attachment_status: Optional[str] = "saved-original"
+    reason: Optional[str] = None
+
+def get_system_downloads_dir() -> Path:
+    """
+    Resolve the configured system Downloads folder.
+    On Windows, queries the Windows Known Folder API (FOLDERID_Downloads: {374DE290-123F-4565-9164-39C4925E467B})
+    and User Shell Folders registry, correctly handling redirected user directories (e.g. E:\\Users\\DELL\\Downloads).
+    Falls back to Path.home() / "Downloads" on other platforms or if unconfigured.
+    Can also be overridden by OWI_DOWNLOADS_DIR environment variable for test isolation.
+    """
+    env_dir = os.environ.get("OWI_DOWNLOADS_DIR")
+    if env_dir:
+        p = Path(env_dir).resolve()
+        if p.exists() and p.is_dir():
+            return p
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+                val, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
+                expanded = os.path.expandvars(val)
+                p = Path(expanded).resolve()
+                if p.exists() and p.is_dir():
+                    return p
+        except Exception:
+            pass
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+            guid_str = "{374DE290-123F-4565-9164-39C4925E467B}"
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', wintypes.BYTE * 8)
+                ]
+            iid = GUID()
+            ctypes.windll.ole32.IIDFromString(guid_str, ctypes.byref(iid))
+            p_path = wintypes.LPWSTR()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(iid), 0, None, ctypes.byref(p_path)) == 0:
+                p = Path(p_path.value).resolve()
+                if p.exists() and p.is_dir():
+                    return p
+        except Exception:
+            pass
+
+    return (Path.home() / "Downloads").resolve()
+
+def get_chrome_downloads_dir() -> Path:
+    """
+    Resolve the configured Chrome Downloads folder for browser download handoff.
+    Priority:
+    1. settings.CHROME_DOWNLOADS_DIR or settings.DOWNLOADS_DIR (set directly or via OWI_CHROME_DOWNLOADS_DIR / OWI_DOWNLOADS_DIR).
+    2. Environment variable OWI_CHROME_DOWNLOADS_DIR or OWI_DOWNLOADS_DIR.
+    3. Persistent deployment config file: settings.DATA_DIR / "chrome_downloads_dir.txt".
+    4. Host default known folder via get_system_downloads_dir().
+    """
+    if getattr(settings, "CHROME_DOWNLOADS_DIR", None):
+        p = Path(settings.CHROME_DOWNLOADS_DIR).resolve()
+        if p.exists() and p.is_dir():
+            return p
+
+    if getattr(settings, "DOWNLOADS_DIR", None):
+        p = Path(settings.DOWNLOADS_DIR).resolve()
+        if p.exists() and p.is_dir():
+            return p
+
+    env_chrome = os.environ.get("OWI_CHROME_DOWNLOADS_DIR") or os.environ.get("OWI_DOWNLOADS_DIR")
+    if env_chrome:
+        p = Path(env_chrome).resolve()
+        if p.exists() and p.is_dir():
+            return p
+
+    cfg_file = settings.DATA_DIR / "chrome_downloads_dir.txt"
+    if cfg_file.exists():
+        try:
+            line = cfg_file.read_text(encoding="utf-8").strip()
+            if line:
+                p = Path(line).resolve()
+                if p.exists() and p.is_dir():
+                    return p
+        except Exception:
+            pass
+
+    return get_system_downloads_dir()
+
+def validate_download_path(path_str: str) -> Path:
+    if not path_str or not isinstance(path_str, str):
+        raise HTTPException(status_code=400, detail="Missing or invalid download path")
+
+    raw_p = Path(path_str)
+    if raw_p.is_symlink():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Symlinks are not allowed for download handoff")
+
+    p = raw_p.resolve()
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Downloaded file not found on disk")
+    if not p.is_file():
+        raise HTTPException(status_code=400, detail="Downloaded path is not a regular file")
+    if p.is_symlink():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Symlinks are not allowed for download handoff")
+
+    suffix_lower = p.suffix.lower()
+    if suffix_lower in {".crdownload", ".tmp", ".part", ".download"}:
+        raise HTTPException(status_code=400, detail="Incomplete or temporary download file cannot be handed off")
+
+    downloads_root = get_chrome_downloads_dir()
+
+    # STRICT: File MUST be inside the configured Chrome Downloads directory!
+    # settings.DATA_DIR / "tmp" and arbitrary temp folders are strictly FORBIDDEN!
+    try:
+        p.relative_to(downloads_root)
+    except ValueError:
+        logger.warning(f"Rejected unauthorized download handoff path outside configured Chrome Downloads directory: {p} (configured: {downloads_root})")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: file path is not within the configured Chrome Downloads directory ({downloads_root})"
+        )
+
+    file_size = p.stat().st_size
+    if file_size > MAX_MEDIA_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum allowed size ({MAX_MEDIA_FILE_BYTES} bytes)"
+        )
+
+    return p
+
+
 class DiagnosticItem(BaseModel):
     timestamp: Optional[str] = None
     stage: str
@@ -862,6 +1110,13 @@ def upload_companion_media_direct(
             detail=f"File size exceeds maximum direct upload limit ({MAX_MEDIA_DIRECT_BYTES} bytes). Use chunked session upload."
         )
 
+    # Validate chat title is not an invalid UI element
+    if req.chat_title and is_invalid_title(req.chat_title):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid chat title '{req.chat_title}'. Real conversation title must be provided."
+        )
+
     # Validate target conversation & confirmation before writing file (P0 4)
     conv = None
     if req.conversation_id is not None:
@@ -875,6 +1130,11 @@ def upload_companion_media_direct(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Explicit confirmation required to merge into imported conversation '{target.title}' (ID {target.id}, {target.source_type})."
+            )
+        if req.chat_title and not is_matching_chat_title(target.title, req.chat_title):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target conversation title mismatch: selected target '{target.title}' (ID {target.id}) does not match capture chat title '{req.chat_title}'."
             )
         conv = target
     elif req.chat_title:
@@ -1002,6 +1262,13 @@ def start_media_upload_session(
     if not safe_session_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id")
 
+    # Validate chat title is not an invalid UI element
+    if req.chat_title and is_invalid_title(req.chat_title):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid chat title '{req.chat_title}'. Real conversation title must be provided."
+        )
+
     # Validate target conversation & confirmation before starting session (P0 4)
     if req.conversation_id is not None:
         target = db.query(Conversation).filter(Conversation.id == req.conversation_id).first()
@@ -1011,6 +1278,11 @@ def start_media_upload_session(
             raise HTTPException(
                 status_code=400,
                 detail=f"Explicit confirmation required to merge into imported conversation '{target.title}' (ID {target.id}, {target.source_type})."
+            )
+        if req.chat_title and not is_matching_chat_title(target.title, req.chat_title):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target conversation title mismatch: selected target '{target.title}' (ID {target.id}) does not match capture chat title '{req.chat_title}'."
             )
         if req.message_id is not None:
             msg = db.query(Message).filter(Message.id == req.message_id, Message.conversation_id == target.id).first()
@@ -1338,6 +1610,129 @@ def finish_media_upload_session(
         logger.error(f"Failed to finish media upload session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload session finalization failed: {e}")
 
+@router.post("/media/handoff")
+def handoff_companion_media_download(
+    req: MediaDownloadHandoffRequest,
+    authenticated: bool = Depends(verify_companion_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Scoped Chrome downloads handoff for WhatsApp Web attachments.
+    Validates that download_path is strictly within authorized user Downloads folder.
+    Limits file size, verifies SHA256, binds to message key + attachment position + selected conversation.
+    Atomically copies file into data/media subfolder and links MediaAsset & AttachmentRecord.
+    Never reads arbitrary paths or transmits to cloud.
+    """
+    safe_source_path = validate_download_path(req.download_path)
+
+    file_size = safe_source_path.stat().st_size
+    if file_size > MAX_MEDIA_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum allowed size ({MAX_MEDIA_FILE_BYTES} bytes)"
+        )
+
+    if req.chat_title and is_invalid_title(req.chat_title):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid chat title '{req.chat_title}'. Real conversation title must be provided."
+        )
+
+    conv = None
+    if req.conversation_id is not None:
+        target = db.query(Conversation).filter(Conversation.id == req.conversation_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail=f"Target conversation ID {req.conversation_id} not found.")
+        if target.source_type != "companion" and not req.confirm_target_merge:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Explicit confirmation required to merge into imported conversation '{target.title}' (ID {target.id}, {target.source_type})."
+            )
+        if req.chat_title and not is_matching_chat_title(target.title, req.chat_title):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target conversation title mismatch: selected target '{target.title}' (ID {target.id}) does not match capture chat title '{req.chat_title}'."
+            )
+        conv = target
+    elif req.chat_title:
+        conv = db.query(Conversation).filter(
+            Conversation.title == req.chat_title,
+            Conversation.source_type == "companion"
+        ).first()
+
+    if not conv:
+        if req.chat_title:
+            conv = Conversation(title=req.chat_title, source_type="companion", message_count=0)
+            db.add(conv)
+            db.flush()
+        else:
+            raise HTTPException(status_code=400, detail="Target conversation must be specified or chat_title provided.")
+
+    msg = None
+    if req.message_id is not None:
+        msg = db.query(Message).filter(Message.id == req.message_id, Message.conversation_id == conv.id).first()
+        if not msg:
+            raise HTTPException(status_code=404, detail=f"Message ID {req.message_id} not found in conversation {conv.id}.")
+    elif req.platform_msg_id:
+        msg = db.query(Message).filter(Message.raw_text == req.platform_msg_id, Message.conversation_id == conv.id).first()
+
+    media_bytes = safe_source_path.read_bytes()
+    category = determine_media_category(req.file_name, req.mime_type, req.file_type)
+
+    final_path, final_name, sha, f_size = save_media_file_atomically(
+        media_bytes=media_bytes,
+        category=category,
+        raw_filename=req.file_name,
+        expected_sha256=req.sha256
+    )
+
+    try:
+        asset = link_media_asset_to_message(
+            db=db,
+            conversation_id=conv.id,
+            message_id=msg.id if msg else None,
+            final_path=final_path,
+            file_name=final_name,
+            category=category,
+            mime_type=req.mime_type,
+            file_size=f_size,
+            sha256_hash=sha,
+            message_key=req.message_key or req.platform_msg_id,
+            attachment_position=req.attachment_position
+        )
+        rec = record_attachment_status(
+            db=db,
+            conversation_id=conv.id,
+            message_id=msg.id if msg else None,
+            file_name=req.file_name,
+            file_type=category,
+            status="saved-original",
+            session_id=req.session_id,
+            message_key=req.message_key or req.platform_msg_id,
+            attachment_position=req.attachment_position,
+            mime_type=req.mime_type,
+            file_size=f_size,
+            sha256_hash=sha,
+            media_asset_id=asset.id,
+            reason=req.reason
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to persist media handoff asset: {e}")
+
+    return {
+        "status": "success",
+        "asset_id": asset.id,
+        "message_id": msg.id if msg else None,
+        "conversation_id": conv.id,
+        "file_name": final_name,
+        "category": category,
+        "file_size": f_size,
+        "sha256": sha,
+        "attachment_status": "saved-original"
+    }
+
 # --- Ingestion Endpoint ---
 
 @router.post("/ingest")
@@ -1354,6 +1749,13 @@ def ingest_companion_selection(
     if not req.messages:
         raise HTTPException(status_code=400, detail="No messages provided for capture.")
 
+    # Validate chat title is not an invalid UI string
+    if req.chat_title and is_invalid_title(req.chat_title):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid chat title '{req.chat_title}'. WhatsApp Web UI profile/contact element detected instead of actual conversation title."
+        )
+
     # 1. Target Conversation Selection
     conv = None
     if req.target_conversation_id is not None:
@@ -1367,6 +1769,11 @@ def ingest_companion_selection(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Explicit confirmation required to merge into imported conversation '{target.title}' (ID {target.id}, {target.source_type})."
+            )
+        if req.chat_title and not is_matching_chat_title(target.title, req.chat_title):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target conversation title mismatch: selected target '{target.title}' (ID {target.id}) does not match capture chat title '{req.chat_title}'."
             )
         conv = target
     else:

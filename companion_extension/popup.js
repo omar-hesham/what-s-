@@ -211,10 +211,101 @@ document.addEventListener("DOMContentLoaded", async () => {
   const targetSelect = document.getElementById("target-conversation-select");
   const importedTargetWarning = document.getElementById("imported-target-warning");
   const confirmMergeCheck = document.getElementById("confirm-merge-check");
+  const activeChatIndicator = document.getElementById("active-chat-indicator");
+  const activeChatTitleTxt = document.getElementById("active-chat-title-txt");
+
+  const INVALID_CHAT_TITLES = new Set([
+    "profile details",
+    "تفاصيل الملف الشخصي",
+    "معلومات جهة الاتصال",
+    "contact info",
+    "معلومات المجموعة",
+    "group info"
+  ]);
+
+  function isInvalidTitle(title) {
+    if (!title || typeof title !== "string") return true;
+    const norm = title.trim().toLowerCase();
+    if (INVALID_CHAT_TITLES.has(norm)) return true;
+    if (norm.startsWith("profile details") || norm.startsWith("تفاصيل الملف الشخصي")) return true;
+    return false;
+  }
+
+  function isMatchingChatTitle(t1, t2) {
+    if (!t1 || !t2) return false;
+    const n1 = t1.trim().toLowerCase();
+    const n2 = t2.trim().toLowerCase();
+    if (n1 === n2) return true;
+
+    // Strict: Reject match if one is a group and the other is not
+    const groupIndicators = ["group", "مجموعة"];
+    const isG1 = groupIndicators.some((gi) => n1.includes(gi));
+    const isG2 = groupIndicators.some((gi) => n2.includes(gi));
+    if (isG1 !== isG2) return false;
+
+    function extractArchiveNameSegment(titleStr) {
+      let s = titleStr.trim().toLowerCase();
+      s = s.replace(/\(.*?\)\s*$/, "").trim();
+      s = s.replace(/\s*[-–—]\s*(?:\d{2,4}\s*)?(?:export|archive|تصدير|أرشيف|backup|نسخة).*$/i, "").trim();
+      s = s.replace(/\s*[-–—]\s*(?:export|archive|تصدير|أرشيف|backup|نسخة)(?:\s*\d{2,4})?.*$/i, "").trim();
+      const prefixes = [
+        "whatsapp chat with ", "whatsapp chat - ", "whatsapp chat ",
+        "chat with ", "imported archive ", "archive with ", "archive - ", "archive ",
+        "whatsapp web ",
+        "محادثة مع ", "محادثة ", "دردشة مع ", "دردشة ", "رسائل مع ", "رسائل ",
+        "أرشيف محادثة مع ", "أرشيف محادثة ", "أرشيف دردشة مع ", "أرشيف دردشة ", "أرشيف "
+      ];
+      for (const pfx of prefixes) {
+        if (s.startsWith(pfx)) {
+          s = s.substring(pfx.length).trim();
+          break;
+        }
+      }
+      s = s.replace(/\(.*?\)\s*$/, "").trim();
+      s = s.replace(/\s*[-–—]\s*(?:\d{2,4}\s*)?(?:export|archive|تصدير|أرشيف|backup|نسخة).*$/i, "").trim();
+      return s;
+    }
+
+    const seg1 = extractArchiveNameSegment(t1);
+    const seg2 = extractArchiveNameSegment(t2);
+
+    if (seg1 && seg1 === n2) return true;
+    if (seg2 && seg2 === n1) return true;
+    if (seg1 && seg2 && seg1 === seg2 && (seg1 !== n1 || seg2 !== n2)) return true;
+
+    return false;
+  }
+
+
+  async function getActiveWhatsAppChatTitle() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !tab.url || !tab.url.includes("web.whatsapp.com")) {
+        return null;
+      }
+      return new Promise((resolve) => {
+        chrome.tabs.sendMessage(tab.id, { action: "get_active_chat_title" }, (resp) => {
+          if (chrome.runtime.lastError || !resp || !resp.success) {
+            resolve(null);
+          } else {
+            resolve(resp.chatTitle);
+          }
+        });
+      });
+    } catch (e) {
+      return null;
+    }
+  }
 
   async function loadAvailableTargets() {
     if (!targetSelect) return;
     try {
+      const activeChatTitle = await getActiveWhatsAppChatTitle();
+      if (activeChatTitle && activeChatIndicator && activeChatTitleTxt) {
+        activeChatTitleTxt.innerText = `"${activeChatTitle}"`;
+        activeChatIndicator.style.display = "block";
+      }
+
       const res = await new Promise((resolve) => {
         chrome.runtime.sendMessage({ action: "bridge_get_targets" }, (r) => {
           resolve(r || { success: false });
@@ -222,13 +313,32 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
       if (res && res.success && Array.isArray(res.targets)) {
         targetSelect.innerHTML = '<option value="new">-- إنشاء محادثة رفيق جديدة (تلقائي) --</option>';
+        let matchedTarget = null;
+
         for (const t of res.targets) {
           const opt = document.createElement("option");
           opt.value = t.id;
           opt.dataset.sourceType = t.source_type;
           opt.dataset.msgCount = t.message_count;
-          opt.innerText = `[#${t.id}] ${t.title} (${t.message_count} رسالة - ${t.source_type})`;
+          opt.dataset.chatTitle = t.title;
+
+          const isMatch = activeChatTitle && isMatchingChatTitle(t.title, activeChatTitle);
+
+          if (isMatch && !matchedTarget) {
+            matchedTarget = t;
+            opt.selected = true;
+            opt.innerText = `⭐️ [#${t.id}] ${t.title} (${t.message_count} رسالة - ${t.source_type}) [مطابق لمحادثة واتساب الحالية]`;
+          } else {
+            opt.innerText = `[#${t.id}] ${t.title} (${t.message_count} رسالة - ${t.source_type})`;
+          }
           targetSelect.appendChild(opt);
+        }
+
+        if (matchedTarget) {
+          const isImported = matchedTarget.source_type && matchedTarget.source_type !== "companion";
+          if (importedTargetWarning) {
+            importedTargetWarning.style.display = isImported ? "block" : "none";
+          }
         }
       }
     } catch (e) {}
@@ -342,9 +452,30 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    // Verify active WhatsApp tab & query chat title
+    const activeChatTitle = await getActiveWhatsAppChatTitle();
+    if (!activeChatTitle || isInvalidTitle(activeChatTitle)) {
+      showStatus(
+        `خطأ: تعذر التعرف على محادثة واتساب صالحة (العنوان المرصود: "${activeChatTitle || "غير محدد"}"). يرجى فتح محادثة WhatsApp المطلوبة والتأكد من عدم فتح تفاصيل الملف الشخصي (Profile details).`,
+        "error"
+      );
+      return;
+    }
+
     const selectedTargetVal = targetSelect ? targetSelect.value : "new";
     const selectedOpt = targetSelect && targetSelect.selectedIndex >= 0 ? targetSelect.options[targetSelect.selectedIndex] : null;
     const isImported = selectedOpt && selectedOpt.dataset.sourceType && selectedOpt.dataset.sourceType !== "companion" && selectedTargetVal !== "new";
+
+    // Validate target title vs active chat title
+    if (selectedTargetVal !== "new" && selectedOpt && selectedOpt.dataset.chatTitle) {
+      if (!isMatchingChatTitle(selectedOpt.dataset.chatTitle, activeChatTitle)) {
+        showStatus(
+          `خطأ في التطابق: محادثة واتساب المفتوحة حالياً ("${activeChatTitle}") لا تطابق المحادثة المحددة كوجهة ("${selectedOpt.dataset.chatTitle}"). يرجى فتح محادثة "${selectedOpt.dataset.chatTitle}" في واتساب ويب أولاً منعاً لخلط الرسائل.`,
+          "error"
+        );
+        return;
+      }
+    }
 
     if (isImported && (!confirmMergeCheck || !confirmMergeCheck.checked)) {
       showStatus("يرجى تأكيد رغبتك في الدمج مع المحادثة المستوردة قبل البدء.", "error");

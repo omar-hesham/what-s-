@@ -183,10 +183,123 @@
     };
   }
 
+  const MONTH_MAP = {
+    // English
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+    "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+    // Arabic
+    "يناير": 1, "فبراير": 2, "مارس": 3, "أبريل": 4, "ابريل": 4, "مايو": 5,
+    "يونيو": 6, "يوليو": 7, "أغسطس": 8, "اغسطس": 8, "سبتمبر": 9,
+    "أكتوبر": 10, "اكتوبر": 10, "نوفمبر": 11, "ديسمبر": 12
+  };
+
+  /**
+   * Extract a calendar date (DD/MM/YYYY) from arbitrary text (e.g. date dividers).
+   * Supports numeric formats and English/Arabic month names.
+   */
+  function extractAbsoluteDateFromText(text, options = {}) {
+    if (!text || typeof text !== "string") return null;
+    const dateOrder = options.dateOrder || "DD/MM/YYYY";
+    const dayFirst = dateOrder.toUpperCase().startsWith("DD");
+
+    let cleaned = cleanBidi(text);
+    cleaned = normalizeArabicDigits(cleaned).trim();
+
+    // 1. Numeric format: 14/09/2026, 14-09-2026, 14.09.2026, 2026-09-14
+    const numMatch = cleaned.match(/(\d{1,4})[/\-\.](\d{1,2})[/\-\.](\d{1,4})/);
+    if (numMatch) {
+      const p1 = parseInt(numMatch[1], 10);
+      const p2 = parseInt(numMatch[2], 10);
+      const p3 = parseInt(numMatch[3], 10);
+      let year = 0, month = 0, day = 0;
+      if (p1 > 1000) {
+        year = p1; month = p2; day = p3;
+      } else {
+        year = p3 < 70 ? 2000 + p3 : (p3 < 100 ? 1900 + p3 : p3);
+        if (p1 > 12) {
+          day = p1; month = p2;
+        } else if (p2 > 12) {
+          month = p1; day = p2;
+        } else {
+          if (dayFirst) { day = p1; month = p2; }
+          else { month = p1; day = p2; }
+        }
+      }
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const testD = new Date(year, month - 1, day);
+        if (testD.getFullYear() === year && testD.getMonth() === month - 1 && testD.getDate() === day) {
+          return `${pad(day, 2)}/${pad(month, 2)}/${pad(year, 4)}`;
+        }
+      }
+    }
+
+    // 2. Month name format: "14 September 2026", "September 14, 2026", "١٤ سبتمبر ٢٠٢٦"
+    const words = cleaned.toLowerCase().replace(/[,،]/g, " ").split(/\s+/).filter(Boolean);
+    let foundMonth = null;
+    let foundDay = null;
+    let foundYear = null;
+
+    for (const w of words) {
+      if (MONTH_MAP[w]) {
+        foundMonth = MONTH_MAP[w];
+      } else if (/^\d{4}$/.test(w)) {
+        foundYear = parseInt(w, 10);
+      } else if (/^\d{1,2}$/.test(w)) {
+        const n = parseInt(w, 10);
+        if (n >= 1 && n <= 31) {
+          foundDay = n;
+        }
+      }
+    }
+
+    if (foundMonth && foundDay && foundYear) {
+      const testD = new Date(foundYear, foundMonth - 1, foundDay);
+      if (testD.getFullYear() === foundYear && testD.getMonth() === foundMonth - 1 && testD.getDate() === foundDay) {
+        return `${pad(foundDay, 2)}/${pad(foundMonth, 2)}/${pad(foundYear, 4)}`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse a date divider text into DD/MM/YYYY.
+   * Handles absolute dates as well as TODAY / YESTERDAY (and Arabic equivalents).
+   */
+  function parseDateDivider(text, refDate = new Date()) {
+    if (!text || typeof text !== "string") return null;
+    const cleaned = cleanBidi(text).trim().toLowerCase();
+
+    if (cleaned === "today" || cleaned === "اليوم") {
+      const d = refDate instanceof Date ? refDate : new Date();
+      return `${pad(d.getDate(), 2)}/${pad(d.getMonth() + 1, 2)}/${pad(d.getFullYear(), 4)}`;
+    }
+    if (cleaned === "yesterday" || cleaned === "أمس") {
+      const d = refDate instanceof Date ? new Date(refDate.getTime() - 86400000) : new Date(Date.now() - 86400000);
+      return `${pad(d.getDate(), 2)}/${pad(d.getMonth() + 1, 2)}/${pad(d.getFullYear(), 4)}`;
+    }
+
+    return extractAbsoluteDateFromText(text);
+  }
+
+  /**
+   * Combine a standalone time string with a defensible date string and parse strictly.
+   */
+  function combineTimeAndDate(timeStr, dateStr, options = {}) {
+    if (!timeStr || !dateStr) return null;
+    const combined = `${timeStr}, ${dateStr}`;
+    return parseWhatsAppTimestamp(combined, options);
+  }
+
   return {
     cleanBidi,
     normalizeArabicDigits,
     normalizeAmPm,
-    parseWhatsAppTimestamp
+    parseWhatsAppTimestamp,
+    extractAbsoluteDateFromText,
+    parseDateDivider,
+    combineTimeAndDate
   };
 });

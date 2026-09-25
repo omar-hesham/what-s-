@@ -25,6 +25,186 @@ const MAX_MEDIA_CHUNK_BYTES = 2 * 1024 * 1024; // 2 MB chunk serialized base64 l
 
 let trustedStorageConfigured = false;
 let trustedStorageError = null;
+let pendingDownload = null;
+let lastCompletedDownloadResult = null;
+
+function setupDownloadsListener(downloadsApi = (typeof chrome !== "undefined" ? chrome.downloads : null)) {
+  if (!downloadsApi) return;
+  if (downloadsApi.onCreated && typeof downloadsApi.onCreated.addListener === "function") {
+    downloadsApi.onCreated.addListener((item) => {
+      if (!pendingDownload) return;
+      if (pendingDownload.concurrentConflict) return;
+
+      const itemTime = item.startTime ? new Date(item.startTime).getTime() : Date.now();
+      // Strict: Reject pre-existing download that started before arming
+      if (itemTime < pendingDownload.armedTime - 50) {
+        return; // Pre-existing download from before arming
+      }
+
+      // Ignore unrelated download created from another site
+      if (item.referrer && !item.referrer.includes("whatsapp.com") && item.url && !item.url.startsWith("blob:") && !item.url.includes("whatsapp.com")) {
+        return;
+      }
+
+      // If another download is created concurrently while armed for single-flight capture: fail safely
+      if (pendingDownload.downloadId && pendingDownload.downloadId !== item.id) {
+        pendingDownload.concurrentConflict = true;
+        pendingDownload.complete({
+          success: false,
+          error_code: "CONCURRENT_DOWNLOAD_CONFLICT",
+          error: "Multiple concurrent downloads detected while awaiting single-flight capture"
+        });
+        return;
+      }
+
+      pendingDownload.downloadId = item.id;
+      pendingDownload.initialFilename = item.filename;
+      pendingDownload.url = item.url;
+      pendingDownload.referrer = item.referrer;
+      pendingDownload.mime = item.mime;
+    });
+  }
+
+  if (downloadsApi.onChanged && typeof downloadsApi.onChanged.addListener === "function") {
+    downloadsApi.onChanged.addListener((delta) => {
+      if (!pendingDownload) return;
+      if (pendingDownload.concurrentConflict) return;
+
+      // STRICT: Require onCreated to have established the downloadId!
+      // Under NO circumstances adopt delta.id if onCreated has not matched!
+      if (!pendingDownload.downloadId || delta.id !== pendingDownload.downloadId) {
+        return;
+      }
+
+      if (delta.state) {
+        if (delta.state.current === "complete") {
+          const finalizeDownload = (item) => {
+            if (!pendingDownload) return;
+            if (!item || !item.filename) {
+              pendingDownload.complete({ success: false, error_code: "DOWNLOAD_NOT_FOUND", error: "Download record not found" });
+              return;
+            }
+            if (item.state && item.state !== "complete") {
+              pendingDownload.complete({ success: false, error_code: "DOWNLOAD_INCOMPLETE", error: "Download not complete" });
+              return;
+            }
+
+            // Correlate origin if referrer or url available
+            if (item.referrer && !item.referrer.includes("whatsapp.com") && item.url && !item.url.startsWith("blob:") && !item.url.includes("whatsapp.com")) {
+              pendingDownload.complete({
+                success: false,
+                error_code: "CORRELATION_ORIGIN_MISMATCH",
+                error: "Download did not originate from WhatsApp Web"
+              });
+              return;
+            }
+
+            const fname = (item.filename || "").split(/[\\/]/).pop().toLowerCase();
+            const ext = fname.includes(".") ? ("." + fname.split(".").pop()) : "";
+            const mime = (item.mime || "").toLowerCase();
+
+            // Correlate expected type
+            if (pendingDownload.expectedType) {
+              const t = pendingDownload.expectedType.toLowerCase();
+              if (t === "audio" || t === "voice") {
+                const audioExts = [".ogg", ".opus", ".mp3", ".wav", ".m4a", ".aac", ".webm"];
+                const isAudio = audioExts.includes(ext) || mime.startsWith("audio/");
+                if (ext && !isAudio) {
+                  pendingDownload.complete({
+                    success: false,
+                    error_code: "CORRELATION_TYPE_MISMATCH",
+                    error: `Downloaded file (${fname}) does not match expected audio attachment`
+                  });
+                  return;
+                }
+              } else if (t === "image") {
+                const imageExts = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"];
+                const isImage = imageExts.includes(ext) || mime.startsWith("image/");
+                if (ext && !isImage) {
+                  pendingDownload.complete({
+                    success: false,
+                    error_code: "CORRELATION_TYPE_MISMATCH",
+                    error: `Downloaded file (${fname}) does not match expected image attachment`
+                  });
+                  return;
+                }
+              } else if (t === "video") {
+                const videoExts = [".mp4", ".webm", ".3gp", ".mov", ".avi", ".mkv"];
+                const isVideo = videoExts.includes(ext) || mime.startsWith("video/");
+                if (ext && !isVideo) {
+                  pendingDownload.complete({
+                    success: false,
+                    error_code: "CORRELATION_TYPE_MISMATCH",
+                    error: `Downloaded file (${fname}) does not match expected video attachment`
+                  });
+                  return;
+                }
+              }
+            }
+
+            // Correlate expected filename
+            if (pendingDownload.expectedFilename) {
+              const cleanExpected = pendingDownload.expectedFilename.trim().toLowerCase();
+              const expectedBase = cleanExpected.replace(/\.[^/.]+$/, "");
+              const expectedExt = cleanExpected.includes(".") ? ("." + cleanExpected.split(".").pop()) : "";
+              if (expectedExt && ext && expectedExt !== ext) {
+                pendingDownload.complete({
+                  success: false,
+                  error_code: "CORRELATION_FILENAME_MISMATCH",
+                  error: `Downloaded file extension (${ext}) does not match expected (${expectedExt})`
+                });
+                return;
+              }
+              if (expectedBase && !["voice", "audio", "document", "whatsapp", "file"].includes(expectedBase)) {
+                const downloadedBase = fname.replace(/\.[^/.]+$/, "").replace(/\s*\(\d+\)$/, "");
+                const isVoice = (pendingDownload.expectedType === "voice" || pendingDownload.expectedType === "audio");
+                if (!isVoice && downloadedBase && downloadedBase !== expectedBase && !downloadedBase.startsWith(expectedBase) && !expectedBase.startsWith(downloadedBase)) {
+                  pendingDownload.complete({
+                    success: false,
+                    error_code: "CORRELATION_FILENAME_MISMATCH",
+                    error: `Downloaded file name (${fname}) does not match expected (${cleanExpected})`
+                  });
+                  return;
+                }
+              }
+            }
+
+            pendingDownload.complete({
+              success: true,
+              downloadPath: item.filename,
+              fileSize: item.fileSize || item.totalBytes || 0,
+              mime: item.mime || null
+            });
+          };
+
+          if (typeof downloadsApi.search === "function") {
+            downloadsApi.search({ id: delta.id }, (results) => {
+              const item = results && results[0];
+              finalizeDownload(item);
+            });
+          } else {
+            finalizeDownload({
+              filename: delta.filename?.current || pendingDownload.initialFilename || "downloaded_file",
+              state: "complete",
+              fileSize: 0
+            });
+          }
+        } else if (delta.state.current === "interrupted") {
+          pendingDownload.complete({
+            success: false,
+            error_code: "DOWNLOAD_INTERRUPTED",
+            error: delta.error?.current || "Download interrupted"
+          });
+        }
+      }
+    });
+  }
+}
+
+
+if (typeof chrome !== "undefined" && chrome.downloads) {
+  setupDownloadsListener(chrome.downloads);
+}
 
 async function ensureTrustedStorage(storageLocal) {
   if (trustedStorageConfigured) return true;
@@ -551,6 +731,129 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
     return true;
   }
 
+  // 2g. Download Capture Arming Bridge
+  if (message.action === "bridge_arm_download_capture") {
+    lastCompletedDownloadResult = null;
+    const timeoutMs = message.timeoutMs || 10000;
+    if (pendingDownload && pendingDownload.timer) {
+      clearTimeout(pendingDownload.timer);
+    }
+
+    const armedTime = Date.now();
+    let completeFn = null;
+    const promise = new Promise((resolve) => {
+      completeFn = (result) => {
+        if (pendingDownload && pendingDownload.timer) {
+          clearTimeout(pendingDownload.timer);
+        }
+        lastCompletedDownloadResult = result;
+        pendingDownload = null;
+        resolve(result);
+      };
+    });
+
+    const timer = setTimeout(() => {
+      if (completeFn) {
+        completeFn({ success: false, error_code: "DOWNLOAD_TIMEOUT", error: "Download wait timed out" });
+      }
+    }, timeoutMs);
+
+    pendingDownload = {
+      armedTime,
+      expectedFilename: message.expectedFilename || null,
+      expectedType: message.expectedType || null,
+      timer,
+      promise,
+      complete: completeFn,
+      downloadId: null,
+      concurrentConflict: false
+    };
+
+    if (injectedDeps.onDownloadArmed) {
+      injectedDeps.onDownloadArmed(pendingDownload);
+    }
+    sendResponse({ success: true, status: "armed" });
+    return true;
+  }
+
+  // 2h. Download Await Bridge
+  if (message.action === "bridge_await_download") {
+    if (lastCompletedDownloadResult) {
+      const res = lastCompletedDownloadResult;
+      lastCompletedDownloadResult = null;
+      sendResponse(res);
+      return true;
+    }
+    if (!pendingDownload) {
+      sendResponse({ success: false, error_code: "NO_ARMED_DOWNLOAD", error: "No download currently armed" });
+      return true;
+    }
+    pendingDownload.promise.then((result) => {
+      lastCompletedDownloadResult = null;
+      sendResponse(result);
+    });
+    return true;
+  }
+
+  // 2i. Download Media Handoff Bridge
+  if (message.action === "bridge_media_download_handoff") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const payload = {
+        download_path: message.downloadPath,
+        conversation_id: message.conversationId || null,
+        message_id: message.messageId || null,
+        platform_msg_id: message.platformMsgId || null,
+        message_key: message.messageKey || null,
+        session_id: message.sessionId || null,
+        attachment_position: message.attachmentPosition || null,
+        chat_title: message.chatTitle || null,
+        confirm_target_merge: Boolean(message.confirmTargetMerge),
+        file_name: message.fileName,
+        file_type: message.fileType || "document",
+        mime_type: message.mimeType || "application/octet-stream",
+        sha256: message.sha256 || null,
+        attachment_status: message.attachmentStatus || "saved-original"
+      };
+
+      const res = await fetchFn(`${backendUrl}/api/companion/media/handoff`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, data });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        sendResponse({
+          success: false,
+          error_code: `HTTP_${res.status}`,
+          status: res.status,
+          error: errData.detail || "Download handoff failed"
+        });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR", error: "Could not connect to loopback OWI" });
+    }
+    return true;
+  }
+
   // 3. Capture State Bridge (content script progress without direct storage access)
   if (message.action === "bridge_set_capture_state") {
     try {
@@ -678,6 +981,9 @@ if (typeof module !== "undefined" && module.exports) {
     calculateByteLength,
     ensureTrustedStorage,
     getStoredTokenAndUrl,
-    handleRuntimeMessage
+    handleRuntimeMessage,
+    handleBridgeMessage: handleRuntimeMessage,
+    setupDownloadsListener,
+    getPendingDownload: () => pendingDownload
   };
 }

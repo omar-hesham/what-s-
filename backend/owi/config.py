@@ -57,8 +57,10 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_ENABLED: bool = bool(os.getenv("GEMINI_API_KEY"))
     
-    # Companion Security
+    # Companion Security & Downloads Configuration
     COMPANION_SECRET_KEY: str = "owi-companion-local-bridge-key-2026"
+    CHROME_DOWNLOADS_DIR: Optional[Path] = None
+    DOWNLOADS_DIR: Optional[Path] = None
     
     # Performance Profiles: LIGHT, BALANCED, QUALITY
     PERFORMANCE_PROFILE: Literal["LIGHT", "BALANCED", "QUALITY"] = "BALANCED"

@@ -1761,3 +1761,568 @@ test("BulkEngine: Older messages button clicking is bounded and cancellation-saf
   assert.equal(res.partialReason, "cancelled_by_user");
   assert.equal(olderClicks, 1, "Must immediately halt clicking upon cancellation");
 });
+
+// --- 7. Live DOM Sanity & Regression Tests (2026-09-25 Audit) ---
+
+test("BulkEngine: extractChatTitle avoids 'Profile details' trap and extracts actual chat title 'H'", () => {
+  // Live DOM scenario: An avatar/info icon with title="Profile details" precedes the chat title in the header
+  const mockHeader = {
+    tagName: "HEADER",
+    getAttribute: (attr) => (attr === "data-testid" ? "conversation-header" : null),
+    querySelector: (sel) => {
+      if (sel.includes("conversation-info-header-chat-title")) {
+        return {
+          tagName: "DIV",
+          innerText: "H",
+          textContent: "H",
+          getAttribute: (attr) => (attr === "data-testid" ? "conversation-info-header-chat-title" : null)
+        };
+      }
+      if (sel.includes("conversation-info-header")) {
+        return {
+          tagName: "DIV",
+          innerText: "H",
+          textContent: "H",
+          getAttribute: () => null
+        };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("[title]")) {
+        return [
+          { getAttribute: () => "Profile details", innerText: "Profile details" },
+          { getAttribute: () => "H", innerText: "H" }
+        ];
+      }
+      return [];
+    }
+  };
+
+  const mockDoc = {
+    querySelector: (sel) => {
+      if (sel.includes("header[data-testid='conversation-header']") || sel.includes("conversation-info-header-chat-title")) {
+        return mockHeader.querySelector(sel);
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => mockHeader.querySelectorAll(sel)
+  };
+
+  const title = BulkEngine.extractChatTitle(mockDoc);
+  assert.equal(title, "H", "Must extract chat title 'H' and never accept 'Profile details'");
+  assert.equal(BulkEngine.isInvalidChatTitle("Profile details"), true);
+  assert.equal(BulkEngine.isInvalidChatTitle("تفاصيل الملف الشخصي"), true);
+  assert.equal(BulkEngine.isInvalidChatTitle("H"), false);
+});
+
+test("BulkEngine: Media-only message derives defensible calendar date from preceding date divider", () => {
+  // Container has date divider with 14/09/2026 followed by media-only message row with time 3:21 pm
+  const mockDivider = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-testid" ? "date-divider" : null),
+    classList: { contains: (c) => c === "date-divider" },
+    innerText: "14/09/2026",
+    textContent: "14/09/2026",
+    querySelectorAll: () => []
+  };
+
+  const mockMediaRow = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_media_1" : (attr === "data-testid" ? "conv-msg-media" : null)),
+    classList: { contains: () => false },
+    previousElementSibling: mockDivider,
+    nextElementSibling: null,
+    parentElement: null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return null; // No pre-plain-text on media-only
+      if (sel.includes("msg-meta")) {
+        return { innerText: "3:21 pm", textContent: "3:21 pm", getAttribute: () => null };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("img[src]")) {
+        return [{
+          tagName: "IMG",
+          src: "blob:https://web.whatsapp.com/img1",
+          getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/img1" : null),
+          classList: { contains: () => false }
+        }];
+      }
+      return [];
+    }
+  };
+
+  const mockContainer = {
+    previousElementSibling: null,
+    nextElementSibling: null
+  };
+  mockMediaRow.parentElement = mockContainer;
+
+  const parsed = BulkEngine.parseMessageNode(mockMediaRow, "H", "DD/MM/YYYY", mockContainer);
+  assert.ok(parsed);
+  assert.equal(parsed.has_media, true);
+  assert.equal(parsed.media_type, "image");
+  assert.equal(parsed.raw_timestamp, "3:21 pm");
+  assert.equal(parsed.timestamp_provenance, "derived_neighbor");
+  assert.ok(parsed.parsed_date, "Must parse date derived from date divider");
+  assert.equal(parsed.timestamp, "2026-09-14T15:21:00");
+});
+
+test("BulkEngine: Media-only message derives defensible calendar date from neighboring message row", () => {
+  // Container has preceding text message row on 14/09/2026 followed by media-only row
+  const mockTextRow = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_text_1" : null),
+    classList: { contains: () => false },
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) {
+        return { getAttribute: () => "[10:15 am, 14/09/2026] H: " };
+      }
+      return null;
+    }
+  };
+
+  const mockMediaRow = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_media_2" : null),
+    classList: { contains: () => false },
+    previousElementSibling: mockTextRow,
+    nextElementSibling: null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return null;
+      if (sel.includes("msg-meta")) {
+        return { innerText: "3:21 pm", textContent: "3:21 pm", getAttribute: () => null };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("img[src]")) {
+        return [{
+          tagName: "IMG",
+          src: "blob:https://web.whatsapp.com/img2",
+          getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/img2" : null),
+          classList: { contains: () => false }
+        }];
+      }
+      return [];
+    }
+  };
+
+  const parsed = BulkEngine.parseMessageNode(mockMediaRow, "H", "DD/MM/YYYY");
+  assert.ok(parsed);
+  assert.equal(parsed.timestamp, "2026-09-14T15:21:00");
+  assert.equal(parsed.timestamp_provenance, "derived_neighbor");
+});
+
+test("BulkEngine: Isolated media-only message without date context marks unverified and never falls back to current date", async () => {
+  const mockMediaRow = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_isolated" : null),
+    classList: { contains: () => false },
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: null,
+    getBoundingClientRect: () => ({ top: 10, bottom: 40 }),
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return null;
+      if (sel.includes("msg-meta")) {
+        return { innerText: "3:21 pm", textContent: "3:21 pm", getAttribute: () => null };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("img[src]")) {
+        return [{
+          tagName: "IMG",
+          src: "blob:https://web.whatsapp.com/img_iso",
+          getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/img_iso" : null),
+          classList: { contains: () => false }
+        }];
+      }
+      return [];
+    }
+  };
+
+  const parsed = BulkEngine.parseMessageNode(mockMediaRow, "H", "DD/MM/YYYY");
+  assert.equal(parsed.parsed_date, null, "Must be null, never current date");
+  assert.equal(parsed.timestamp, null);
+  assert.equal(parsed.timestamp_provenance, "unverified");
+  assert.equal(parsed.has_media, true);
+
+  // In runBulkCapture, presence of unverified message marks completeness partial
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 200,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelectorAll: () => [mockMediaRow]
+  };
+
+  const res = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: { querySelector: () => ({ innerText: "H", getAttribute: () => "H" }) },
+    mode: "visible_to_newest",
+    maxScrollAttempts: 2,
+    scrollDelayMs: 2
+  });
+
+  assert.equal(res.completenessStatus, "partial");
+  assert.equal(res.partialReason, "unverified_timestamps_present");
+  assert.equal(res.messages.length, 1, "Must preserve message for correct identity tracking");
+});
+
+test("BulkEngine: Document card detection extracts clean filename from 'Download \"...\"' and treats thumb as clickable download control", () => {
+  let clicked = false;
+  const mockDocThumb = {
+    tagName: "DIV",
+    getAttribute: (attr) => {
+      if (attr === "data-testid") return "document-thumb";
+      if (attr === "title") return 'Download "Project_Specs.docx"';
+      return null;
+    },
+    innerText: "Project_Specs.docx\n2.4 MB • docx",
+    textContent: "Project_Specs.docx\n2.4 MB • docx",
+    click: () => { clicked = true; },
+    querySelectorAll: () => []
+  };
+
+  const mockMsgEl = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) return [mockDocThumb];
+      return [];
+    }
+  };
+
+  const cleanName = BulkEngine.extractDocumentFilename(mockDocThumb);
+  assert.equal(cleanName, "Project_Specs.docx", "Must extract clean filename without Download quotes");
+
+  const atts = BulkEngine.detectMessageAttachments(mockMsgEl, "H");
+  assert.equal(atts.length, 1);
+  assert.equal(atts[0].file_name, "Project_Specs.docx");
+  assert.equal(atts[0].file_type, "document");
+  assert.equal(atts[0].download_el, mockDocThumb, "The document-thumb div itself must be the download control");
+
+  // Verify Arabic pattern as well
+  const mockArabicDoc = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "title" ? 'تنزيل "تقرير_العمليات.pdf"' : null),
+    innerText: "تقرير_العمليات.pdf",
+    querySelectorAll: () => []
+  };
+  assert.equal(BulkEngine.extractDocumentFilename(mockArabicDoc), "تقرير_العمليات.pdf");
+});
+
+test("BulkEngine: Voice note without DOM audio src reports truthful unavailable with voice_note_no_dom_src diagnostic", async () => {
+  // Live DOM facts: button[aria-label="Play voice message"], slider, no <audio> tag or blob url
+  const mockVoicePlayBtn = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => (attr === "aria-label" ? "Play voice message" : null),
+    parentElement: null,
+    querySelectorAll: () => []
+  };
+
+  const mockVoiceRow = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("voice message") || sel.includes("audio")) {
+        return [mockVoicePlayBtn];
+      }
+      return [];
+    }
+  };
+
+  const atts = BulkEngine.detectMessageAttachments(mockVoiceRow, "H");
+  assert.equal(atts.length, 1);
+  const voiceAtt = atts[0];
+  assert.equal(voiceAtt.file_type, "audio");
+  assert.equal(voiceAtt.attachment_status, "unavailable");
+  assert.equal(voiceAtt.diagnostic_reason, "voice_note_no_dom_src");
+
+  // captureAttachmentOriginalBytes returns truthful status without fake bytes
+  const captured = await BulkEngine.captureAttachmentOriginalBytes(voiceAtt);
+  assert.equal(captured.status, "unavailable");
+  assert.equal(captured.reason, "voice_note_no_dom_src");
+  assert.equal(captured.bytes, undefined, "Must NEVER fake audio bytes or transcripts");
+});
+
+test("BulkEngine: Duplicate filenames across different messages bind to distinct message keys without collision", () => {
+  const rowA = {
+    getAttribute: (attr) => (attr === "data-id" ? "msg_key_alpha" : null),
+    classList: { contains: () => false },
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return { getAttribute: () => "[10:00 am, 24/09/2026] H: " };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => (attr === "title" ? 'Download "invoice.pdf"' : null),
+          innerText: "invoice.pdf",
+          querySelectorAll: () => []
+        }];
+      }
+      return [];
+    }
+  };
+
+  const rowB = {
+    getAttribute: (attr) => (attr === "data-id" ? "msg_key_beta" : null),
+    classList: { contains: () => false },
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return { getAttribute: () => "[10:05 am, 24/09/2026] H: " };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => (attr === "title" ? 'Download "invoice.pdf"' : null),
+          innerText: "invoice.pdf",
+          querySelectorAll: () => []
+        }];
+      }
+      return [];
+    }
+  };
+
+  const parsedA = BulkEngine.parseMessageNode(rowA, "H");
+  const parsedB = BulkEngine.parseMessageNode(rowB, "H");
+
+  assert.notEqual(parsedA.key, parsedB.key);
+  assert.equal(parsedA.platform_msg_id, "msg_key_alpha");
+  assert.equal(parsedB.platform_msg_id, "msg_key_beta");
+  assert.equal(parsedA.attachments[0].file_name, "invoice.pdf");
+  assert.equal(parsedB.attachments[0].file_name, "invoice.pdf");
+});
+
+test("BulkEngine: Date range downward traversal reaching chat bottom finishes complete (not history_exhausted_before_to_bound)", async () => {
+  // Scenario: Chat ends on 24/09/2026. User selects toDate 25/09/2026.
+  // Downward traversal hits container bottom (isAtBottom && bottomExhaustedCount >= 2).
+  // Must finish with completenessStatus "complete" because all messages to chat end were reached.
+  let step = 0;
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 200, // At bottom already
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelectorAll: () => {
+      step++;
+      return [
+        {
+          getAttribute: (attr) => (attr === "data-id" ? "msg_end_of_chat" : null),
+          classList: { contains: () => false },
+          getBoundingClientRect: () => ({ top: 10, bottom: 30 }),
+          querySelector: () => ({
+            innerText: "Final real message in H chat",
+            getAttribute: () => "[10:00 am, 24/09/2026] H: "
+          })
+        }
+      ];
+    }
+  };
+
+  const result = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: { querySelector: () => ({ innerText: "H", getAttribute: () => "H" }) },
+    mode: "date_range",
+    fromDate: "2026-09-24T10:00:00",
+    toDate: "2026-09-25T23:59:59", // Future or later than latest real message
+    maxScrollAttempts: 5,
+    scrollDelayMs: 2
+  });
+
+  assert.equal(result.completenessStatus, "complete", "Reaching natural chat bottom must be complete");
+  assert.equal(result.partialReason, null);
+  assert.equal(result.messages.length, 1);
+});
+
+test("BulkEngine: Context menu Download automation acquires genuine download for voice notes and documents", async () => {
+  let contextMenuDispatched = false;
+  let downloadMenuItemClicked = false;
+
+  // Real WhatsApp Web DOM: <button aria-label="Download" role="menuitem"> under div[role="menu"]
+  const mockDownloadMenuItem = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => {
+      if (attr === "aria-label") return "Download";
+      if (attr === "role") return "menuitem";
+      return null;
+    },
+    innerText: "Download",
+    click: () => { downloadMenuItemClicked = true; }
+  };
+
+  const mockVoiceBtn = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => (attr === "aria-label" ? "Play voice message" : null),
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 40, height: 40 }),
+    dispatchEvent: (evt) => {
+      if (evt && evt.type === "contextmenu") {
+        contextMenuDispatched = true;
+      }
+    },
+    closest: () => null,
+    querySelectorAll: () => []
+  };
+
+  const mockDoc = {
+    querySelectorAll: (sel) => {
+      if (contextMenuDispatched && (sel.includes("role='menu'") || sel.includes("button[role='menuitem']") || sel.includes("role='button'"))) {
+        return [mockDownloadMenuItem];
+      }
+      return [];
+    }
+  };
+
+  const att = {
+    id: "att_voice_real",
+    file_type: "audio",
+    file_name: "voice_note_1.ogg",
+    mime_type: "audio/ogg",
+    blob_url: null,
+    download_el: null,
+    container_el: mockVoiceBtn,
+    can_context_download: true
+  };
+
+  const mockBridgeCalls = [];
+  const mockSender = async (p) => {
+    mockBridgeCalls.push(p);
+    if (p.action === "bridge_arm_download_capture") {
+      return { success: true, status: "armed" };
+    }
+    if (p.action === "bridge_await_download") {
+      return {
+        success: true,
+        downloadPath: "E:\\Users\\DELL\\Downloads\\PTT-20260925-WA0001.ogg",
+        fileSize: 88633,
+        mime: "audio/ogg"
+      };
+    }
+    return { success: false };
+  };
+
+  const res = await BulkEngine.captureAttachmentOriginalBytes(att, {
+    bridgeSender: mockSender,
+    doc: mockDoc,
+    timeoutMs: 1000
+  });
+
+  assert.equal(contextMenuDispatched, true, "Must dispatch contextmenu on voice note element");
+  assert.equal(downloadMenuItemClicked, true, "Must click Download item in context menu");
+  assert.equal(res.status, "saved-original");
+  assert.equal(res.download_path, "E:\\Users\\DELL\\Downloads\\PTT-20260925-WA0001.ogg");
+  assert.equal(res.file_size, 88633);
+});
+
+test("BackgroundBridge: Download capture arming state machine coordinates single-flight downloads and handles completion, timeout, pre-existing, and concurrent downloads", async () => {
+  const bridge = BackgroundBridge.handleRuntimeMessage || BackgroundBridge.handleBridgeMessage;
+  const validSender = { id: "test_ext_id", url: "chrome-extension://test_ext_id/popup.html" };
+
+  // 1. Calling await download without arming returns NO_ARMED_DOWNLOAD
+  let awaitRes1 = null;
+  bridge({ action: "bridge_await_download" }, validSender, (r) => { awaitRes1 = r; });
+  assert.equal(awaitRes1.success, false);
+  assert.equal(awaitRes1.error_code, "NO_ARMED_DOWNLOAD");
+
+  // 2. Setup mock chrome.downloads API
+  let onCreatedCb = null;
+  let onChangedCb = null;
+  const mockDownloadsApi = {
+    onCreated: { addListener: (fn) => { onCreatedCb = fn; } },
+    onChanged: { addListener: (fn) => { onChangedCb = fn; } },
+    search: (query, cb) => {
+      cb([{
+        id: query.id,
+        filename: "E:\\Users\\DELL\\Downloads\\PTT-real.ogg",
+        state: "complete",
+        fileSize: 88633,
+        mime: "audio/ogg"
+      }]);
+    }
+  };
+  BackgroundBridge.setupDownloadsListener(mockDownloadsApi);
+
+  // 3. Pre-existing download rejection: an item created before arming time is strictly ignored
+  const tArm = Date.now();
+  let armRes = null;
+  bridge(
+    { action: "bridge_arm_download_capture", expectedFilename: "PTT-real.ogg", timeoutMs: 3000 },
+    validSender,
+    (r) => { armRes = r; }
+  );
+  assert.equal(armRes.success, true);
+  assert.equal(armRes.status, "armed");
+
+  // Fire onCreated with old startTime (pre-existing download from 5 seconds ago)
+  onCreatedCb({ id: 50, startTime: new Date(tArm - 5000).toISOString(), filename: "E:\\Users\\DELL\\Downloads\\old.zip" });
+  const pending1 = BackgroundBridge.getPendingDownload();
+  assert.equal(pending1.downloadId, null, "Pre-existing download must not be adopted as armed download ID");
+
+  // Fire onChanged for that pre-existing item: must NOT complete the armed download
+  onChangedCb({ id: 50, state: { current: "complete" } });
+  assert.equal(pending1.downloadId, null, "onChanged for pre-existing download must not complete armed capture");
+
+  // 4. Fire onChanged without prior onCreated: must NOT adopt delta.id
+  onChangedCb({ id: 999, state: { current: "complete" } });
+  assert.equal(pending1.downloadId, null, "onChanged without matching onCreated must not adopt delta.id");
+
+  // 5. Concurrent download conflict: firing a second onCreated while first is in-flight fails safely
+  onCreatedCb({ id: 101, startTime: new Date(tArm + 50).toISOString(), filename: "E:\\Users\\DELL\\Downloads\\first.ogg" });
+  assert.equal(pending1.downloadId, 101);
+
+  // Second unexpected concurrent download begins
+  onCreatedCb({ id: 102, startTime: new Date(tArm + 80).toISOString(), filename: "E:\\Users\\DELL\\Downloads\\second.ogg" });
+  assert.equal(pending1.concurrentConflict, true, "Must detect concurrent download conflict");
+
+  let concurrentAwaitRes = await new Promise((resolve) => {
+    bridge({ action: "bridge_await_download" }, validSender, resolve);
+  });
+  assert.equal(concurrentAwaitRes.success, false);
+  assert.equal(concurrentAwaitRes.error_code, "CONCURRENT_DOWNLOAD_CONFLICT");
+
+  // 6. Interrupted / cancelled download handling
+  bridge(
+    { action: "bridge_arm_download_capture", expectedFilename: "PTT-real.ogg", timeoutMs: 3000 },
+    validSender,
+    () => {}
+  );
+  const pending2 = BackgroundBridge.getPendingDownload();
+  const tArm2 = Date.now();
+  onCreatedCb({ id: 201, startTime: new Date(tArm2 + 10).toISOString(), filename: "E:\\Users\\DELL\\Downloads\\cancel.ogg" });
+  assert.equal(pending2.downloadId, 201);
+
+  let cancelPromise = new Promise((resolve) => {
+    bridge({ action: "bridge_await_download" }, validSender, resolve);
+  });
+  onChangedCb({ id: 201, state: { current: "interrupted" }, error: { current: "USER_CANCELED" } });
+
+  const cancelRes = await cancelPromise;
+  assert.equal(cancelRes.success, false);
+  assert.equal(cancelRes.error_code, "DOWNLOAD_INTERRUPTED");
+
+  // 7. Successful single-flight completion
+  bridge(
+    { action: "bridge_arm_download_capture", expectedFilename: "PTT-real.ogg", timeoutMs: 3000 },
+    validSender,
+    () => {}
+  );
+  const pending3 = BackgroundBridge.getPendingDownload();
+  const tArm3 = Date.now();
+  onCreatedCb({ id: 301, startTime: new Date(tArm3 + 10).toISOString(), filename: "E:\\Users\\DELL\\Downloads\\PTT-real.ogg" });
+  assert.equal(pending3.downloadId, 301);
+
+  let successPromise = new Promise((resolve) => {
+    bridge({ action: "bridge_await_download" }, validSender, resolve);
+  });
+  onChangedCb({ id: 301, state: { current: "complete" } });
+
+  const successRes = await successPromise;
+  assert.equal(successRes.success, true);
+  assert.equal(successRes.downloadPath, "E:\\Users\\DELL\\Downloads\\PTT-real.ogg");
+  assert.equal(successRes.fileSize, 88633);
+});

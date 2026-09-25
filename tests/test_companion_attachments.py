@@ -16,6 +16,7 @@ Phase 2A Verification Suite:
 """
 
 import os
+import sys
 import base64
 import hashlib
 from pathlib import Path
@@ -1372,3 +1373,282 @@ def test_overlap_matching_strict_sender_and_ambiguity(test_db):
         provenance="verified"
     )
     assert match_ambiguous is None
+
+
+def test_livefix_profile_details_handoff_and_title_guards(test_db, tmp_path, monkeypatch):
+    """
+    Live WhatsApp Web Bug Regression Verification:
+    1. is_invalid_title: Rejects 'Profile details' on ingest, media upload, session start, handoff.
+    2. Target conversation title mismatch:
+       - Matches real imported H title 'محادثة H (تعديلات الكتاب)' against capture title 'H'.
+       - Rejects mismatching target conversation title (e.g. Alice vs Bob).
+    3. Media download handoff: Valid path in configured Downloads moves file atomically and records MediaAsset; path traversal is rejected.
+    4. Duplicate filenames across messages with distinct message keys do not collide.
+    """
+    token = get_auth_token()
+    monkeypatch.setenv("OWI_DOWNLOADS_DIR", str(tmp_path))
+
+    # 1. Invalid chat title rejection (Profile details trap)
+    # A. Ingest
+    res_ingest_bad = client.post(
+        "/api/companion/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "Profile details",
+            "messages": [{"sender": "Alice", "text": "Hello", "timestamp": "2026-09-25T12:00:00"}]
+        }
+    )
+    assert res_ingest_bad.status_code == 400
+    assert "profile" in res_ingest_bad.json()["detail"].lower()
+
+    # B. Media upload
+    res_upload_bad = client.post(
+        "/api/companion/media/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "Profile details",
+            "file_name": "pic.jpg",
+            "media_base64": base64.b64encode(b"fake").decode()
+        }
+    )
+    assert res_upload_bad.status_code == 400
+    assert "profile" in res_upload_bad.json()["detail"].lower()
+
+    # C. Media session start
+    res_start_bad = client.post(
+        "/api/companion/media/session/start",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "session_id": "test_sess_invalid_title",
+            "chat_title": "تفاصيل الملف الشخصي",
+            "file_name": "video.mp4",
+            "total_bytes": 100,
+            "total_chunks": 1
+        }
+    )
+    assert res_start_bad.status_code == 400
+    assert "invalid chat title" in res_start_bad.json()["detail"].lower()
+
+    # 2. Target conversation title matching and mismatch guard
+    # Real H target matching: 'محادثة H (تعديلات الكتاب)' matches capture title 'H'
+    conv_h = Conversation(id=888, title="محادثة H (تعديلات الكتاب)", source_type="export_zip", message_count=197)
+    conv_h_group = Conversation(id=889, title="H Group", source_type="companion")
+    conv_h_group_archive = Conversation(id=890, title="محادثة H Group (تعديلات الكتاب)", source_type="export_zip")
+    conv_alice = Conversation(title="Alice Smith", source_type="companion")
+    test_db.add_all([conv_h, conv_h_group, conv_h_group_archive, conv_alice])
+    test_db.commit()
+
+    res_h_match = client.post(
+        "/api/companion/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "H",
+            "target_conversation_id": conv_h.id,
+            "confirm_target_merge": True,
+            "messages": [{"sender": "H", "text": "Testing live title match", "timestamp": "2026-09-25T12:00:00"}]
+        }
+    )
+    assert res_h_match.status_code == 200
+    assert res_h_match.json()["conversation_id"] == conv_h.id
+
+    # Title subset rejection: 'H Group' must NOT match live 'H'
+    res_h_group_mismatch = client.post(
+        "/api/companion/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "H",
+            "target_conversation_id": conv_h_group.id,
+            "confirm_target_merge": True,
+            "messages": [{"sender": "H", "text": "Testing group rejection", "timestamp": "2026-09-25T12:00:00"}]
+        }
+    )
+    assert res_h_group_mismatch.status_code == 400
+    assert "mismatch" in res_h_group_mismatch.json()["detail"].lower()
+
+    # Archive subset rejection: 'محادثة H Group (تعديلات الكتاب)' must NOT match live 'H'
+    res_h_group_arch_mismatch = client.post(
+        "/api/companion/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "H",
+            "target_conversation_id": conv_h_group_archive.id,
+            "confirm_target_merge": True,
+            "messages": [{"sender": "H", "text": "Testing archive group rejection", "timestamp": "2026-09-25T12:00:00"}]
+        }
+    )
+    assert res_h_group_arch_mismatch.status_code == 400
+    assert "mismatch" in res_h_group_arch_mismatch.json()["detail"].lower()
+
+    # Inverse subset rejection: live 'H Group' must NOT match target 'H' archive
+    res_inverse_mismatch = client.post(
+        "/api/companion/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "chat_title": "H Group",
+            "target_conversation_id": conv_h.id,
+            "confirm_target_merge": True,
+            "messages": [{"sender": "H", "text": "Testing inverse mismatch", "timestamp": "2026-09-25T12:00:00"}]
+        }
+    )
+    assert res_inverse_mismatch.status_code == 400
+    assert "mismatch" in res_inverse_mismatch.json()["detail"].lower()
+
+    # Title mismatch: Alice vs Bob
+    res_mismatch = client.post(
+        "/api/companion/media/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Bob Jones",
+            "file_name": "doc.pdf",
+            "media_base64": base64.b64encode(b"fake").decode()
+        }
+    )
+    assert res_mismatch.status_code == 400
+    assert "mismatch" in res_mismatch.json()["detail"].lower()
+
+    # 3. Media download handoff
+    mock_e_downloads = (tmp_path / "mock_e_downloads")
+    mock_e_downloads.mkdir(parents=True, exist_ok=True)
+    mock_c_downloads = (tmp_path / "mock_c_downloads")
+    mock_c_downloads.mkdir(parents=True, exist_ok=True)
+    mock_app_tmp = (settings.DATA_DIR / "tmp")
+    mock_app_tmp.mkdir(parents=True, exist_ok=True)
+
+    import owi.api.routes_companion as rc
+    monkeypatch.setattr(rc, "get_chrome_downloads_dir", lambda: mock_e_downloads.resolve())
+    if "backend.owi.api.routes_companion" in sys.modules:
+        monkeypatch.setattr(sys.modules["backend.owi.api.routes_companion"], "get_chrome_downloads_dir", lambda: mock_e_downloads.resolve())
+
+    # A. Path traversal / outside configured download directory rejection
+    res_handoff_traversal = client.post(
+        "/api/companion/media/handoff",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "file_name": "secret.txt",
+            "download_path": str(Path("C:/Windows/System32/drivers/etc/hosts") if os.name == "nt" else Path("/etc/passwd"))
+        }
+    )
+    assert res_handoff_traversal.status_code == 403
+    assert "access denied" in res_handoff_traversal.json()["detail"].lower()
+
+    # B. C: downloads rejection when E: downloads is configured
+    file_in_c = mock_c_downloads / "c_file.docx"
+    file_in_c.write_bytes(b"content in C downloads")
+    res_handoff_c = client.post(
+        "/api/companion/media/handoff",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "file_name": "c_file.docx",
+            "download_path": str(file_in_c)
+        }
+    )
+    assert res_handoff_c.status_code == 403
+    assert "access denied" in res_handoff_c.json()["detail"].lower()
+
+    # C. settings.DATA_DIR/tmp rejection (generic temp folders forbidden)
+    file_in_tmp = mock_app_tmp / "temp_file.docx"
+    file_in_tmp.write_bytes(b"content in app tmp")
+    res_handoff_tmp = client.post(
+        "/api/companion/media/handoff",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "file_name": "temp_file.docx",
+            "download_path": str(file_in_tmp)
+        }
+    )
+    assert res_handoff_tmp.status_code == 403
+    assert "access denied" in res_handoff_tmp.json()["detail"].lower()
+
+    # D. Incomplete download (.crdownload) rejection
+    file_incomplete = mock_e_downloads / "download.docx.crdownload"
+    file_incomplete.write_bytes(b"partial bytes")
+    res_handoff_incomplete = client.post(
+        "/api/companion/media/handoff",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "file_name": "download.docx",
+            "download_path": str(file_incomplete)
+        }
+    )
+    assert res_handoff_incomplete.status_code == 400
+    assert "incomplete" in res_handoff_incomplete.json()["detail"].lower()
+
+    # E. Valid download handoff from configured Chrome Downloads directory (E:)
+    test_dl_file = mock_e_downloads / "downloaded_spec.docx"
+    dl_content = b"PK synthetic docx content from browser download handoff"
+    test_dl_file.write_bytes(dl_content)
+    dl_sha = hashlib.sha256(dl_content).hexdigest()
+
+    res_handoff_ok = client.post(
+        "/api/companion/media/handoff",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "file_name": "downloaded_spec.docx",
+            "download_path": str(test_dl_file),
+            "sha256": dl_sha,
+            "message_key": "msg_dl_key_1",
+            "attachment_position": 1
+        }
+    )
+    assert res_handoff_ok.status_code == 200
+    handoff_data = res_handoff_ok.json()
+    assert handoff_data["status"] == "success"
+    assert handoff_data["sha256"] == dl_sha
+    assert handoff_data["asset_id"] is not None
+
+    rec = test_db.query(AttachmentRecord).filter(AttachmentRecord.media_asset_id == handoff_data["asset_id"]).first()
+    assert rec is not None
+    assert rec.status == "saved-original"
+
+    asset = test_db.query(MediaAsset).filter(MediaAsset.id == handoff_data["asset_id"]).first()
+    assert asset is not None
+    assert Path(asset.file_path).exists()
+    assert Path(asset.file_path).read_bytes() == dl_content
+
+    # 4. Duplicate filenames across distinct messages preserve distinct records
+    res_dup1 = client.post(
+        "/api/companion/media/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "message_key": "key_alpha",
+            "attachment_position": 1,
+            "file_name": "invoice.pdf",
+            "media_base64": base64.b64encode(b"invoice alpha").decode()
+        }
+    )
+    assert res_dup1.status_code == 200
+
+    res_dup2 = client.post(
+        "/api/companion/media/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "conversation_id": conv_alice.id,
+            "chat_title": "Alice Smith",
+            "message_key": "key_beta",
+            "attachment_position": 1,
+            "file_name": "invoice.pdf",
+            "media_base64": base64.b64encode(b"invoice beta").decode()
+        }
+    )
+    assert res_dup2.status_code == 200
+
+    recs = test_db.query(AttachmentRecord).filter(
+        AttachmentRecord.conversation_id == conv_alice.id,
+        AttachmentRecord.file_name.like("%invoice.pdf%")
+    ).all()
+    assert len(recs) == 2
+    keys = {r.message_key for r in recs}
+    assert keys == {"key_alpha", "key_beta"}

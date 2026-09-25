@@ -174,6 +174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         connBadge.className = "badge badge-connected";
         pairSection.style.display = "none";
         captureSection.style.display = "block";
+        await loadAvailableTargets();
         showStatus("✓ تم الاقتران بنجاح! الإضافة جاهزة لالتقاط المحادثات.", "success");
       } else {
         await OWIDiagnosticLogger.log("pairing", "ERR_AUTH", 0, "auth_rejected");
@@ -207,6 +208,45 @@ document.addEventListener("DOMContentLoaded", async () => {
     chrome.tabs.create({ url: st.owi_backend_url || DEFAULT_BACKEND });
   });
 
+  const targetSelect = document.getElementById("target-conversation-select");
+  const importedTargetWarning = document.getElementById("imported-target-warning");
+  const confirmMergeCheck = document.getElementById("confirm-merge-check");
+
+  async function loadAvailableTargets() {
+    if (!targetSelect) return;
+    try {
+      const res = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: "bridge_get_targets" }, (r) => {
+          resolve(r || { success: false });
+        });
+      });
+      if (res && res.success && Array.isArray(res.targets)) {
+        targetSelect.innerHTML = '<option value="new">-- إنشاء محادثة رفيق جديدة (تلقائي) --</option>';
+        for (const t of res.targets) {
+          const opt = document.createElement("option");
+          opt.value = t.id;
+          opt.dataset.sourceType = t.source_type;
+          opt.dataset.msgCount = t.message_count;
+          opt.innerText = `[#${t.id}] ${t.title} (${t.message_count} رسالة - ${t.source_type})`;
+          targetSelect.appendChild(opt);
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (targetSelect) {
+    targetSelect.addEventListener("change", () => {
+      const selectedOpt = targetSelect.selectedIndex >= 0 ? targetSelect.options[targetSelect.selectedIndex] : null;
+      const isImported = selectedOpt && selectedOpt.dataset.sourceType && selectedOpt.dataset.sourceType !== "companion" && selectedOpt.value !== "new";
+      if (importedTargetWarning) {
+        importedTargetWarning.style.display = isImported ? "block" : "none";
+      }
+      if (confirmMergeCheck && !isImported) {
+        confirmMergeCheck.checked = false;
+      }
+    });
+  }
+
   // Check Current Capture State (Handles popup reopening during long capture)
   async function syncCaptureUI() {
     const st = await chrome.storage.local.get(["owi_capture_state"]);
@@ -226,7 +266,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       };
 
       progressStageTxt.innerText = stageLabels[cap.stage] || cap.stage || "جارٍ الالتقاط...";
-      progressStatsTxt.innerText = `تم فحص: ${cap.messagesScanned || 0} رسالة | تم استيعاب: ${cap.messagesIngested || 0}`;
+      let statsStr = `تم فحص: ${cap.messagesScanned || 0} رسالة | تم استيعاب: ${cap.messagesIngested || 0}`;
+      if (cap.attachmentStats) {
+        const a = cap.attachmentStats;
+        statsStr += `\nالمرفقات: ${a.savedOriginal || 0} أصلي محفوظ | ${a.previewOnly || 0} معاينة | ${a.unavailable || 0} غير متوفر`;
+      }
+      progressStatsTxt.innerText = statsStr;
 
       if (!pollTimer) {
         pollTimer = setInterval(syncCaptureUI, 600);
@@ -241,9 +286,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         pollTimer = null;
       }
 
+      let attBreakdown = "";
+      if (cap.attachmentStats) {
+        const a = cap.attachmentStats;
+        attBreakdown = `\nالمرفقات: ${a.savedOriginal || 0} أصل محفوظ، ${a.previewOnly || 0} معاينة فقط، ${a.unavailable || 0} غير متوفر، ${a.expired || 0} منتهي، ${a.tooLarge || 0} كبير جداً، ${a.unsupported || 0} غير مدعوم، ${a.failed || 0} فشل.`;
+      }
+
       if (cap.completenessStatus === "complete") {
         summaryCard.className = "status-msg status-success";
-        summaryCard.innerText = `✓ اكتمل الالتقاط بالكامل!\nتم استيعاب ${cap.messagesIngested} رسالة بنجاح في محادثة "${cap.chatTitle}". (تخطي ${cap.duplicatesSkipped || 0} مكررة).`;
+        summaryCard.innerText = `✓ اكتمل الالتقاط بالكامل!\nتم استيعاب ${cap.messagesIngested} رسالة بنجاح في محادثة "${cap.chatTitle}". (تخطي ${cap.duplicatesSkipped || 0} مكررة).${attBreakdown}`;
       } else {
         const reasonLabels = {
           history_exhausted_before_from_bound: "انتهت سجلات المحادثة قبل الوصول لتاريخ البداية المطلوب",
@@ -259,7 +310,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         };
         const rText = reasonLabels[cap.partialReason] || cap.partialReason || "سبب غير محدد";
         summaryCard.className = "status-msg status-warning";
-        summaryCard.innerText = `⚠️ تم التقاط جزئي!\nتم استيعاب ${cap.messagesIngested || 0} رسالة. السبب: ${rText}.`;
+        summaryCard.innerText = `⚠️ تم التقاط جزئي!\nتم استيعاب ${cap.messagesIngested || 0} رسالة. السبب: ${rText}.${attBreakdown}`;
       }
     } else if (cap.status === "error") {
       configControls.style.display = "block";
@@ -276,6 +327,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   await syncCaptureUI();
+  if (token) {
+    await loadAvailableTargets();
+  }
 
   // Start Bulk Capture Action
   startBulkBtn.addEventListener("click", async () => {
@@ -287,6 +341,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       showStatus("يرجى فتح واتساب ويب (web.whatsapp.com) والمحادثة المطلوبة أولاً.", "error");
       return;
     }
+
+    const selectedTargetVal = targetSelect ? targetSelect.value : "new";
+    const selectedOpt = targetSelect && targetSelect.selectedIndex >= 0 ? targetSelect.options[targetSelect.selectedIndex] : null;
+    const isImported = selectedOpt && selectedOpt.dataset.sourceType && selectedOpt.dataset.sourceType !== "companion" && selectedTargetVal !== "new";
+
+    if (isImported && (!confirmMergeCheck || !confirmMergeCheck.checked)) {
+      showStatus("يرجى تأكيد رغبتك في الدمج مع المحادثة المستوردة قبل البدء.", "error");
+      return;
+    }
+
+    const targetConversationId = selectedTargetVal !== "new" ? Number(selectedTargetVal) : null;
+    const confirmTargetMerge = Boolean(confirmMergeCheck && confirmMergeCheck.checked);
 
     const mode = modeRange.checked ? "date_range" : "visible_to_newest";
     let fromDate = null;
@@ -322,6 +388,9 @@ document.addEventListener("DOMContentLoaded", async () => {
           fromDate,
           toDate,
           dateOrder,
+          targetConversationId,
+          confirmTargetMerge,
+          captureMedia: true,
           chunkSize: 50
         }
       },

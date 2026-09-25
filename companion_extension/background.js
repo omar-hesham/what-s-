@@ -20,6 +20,8 @@
 const MAX_INGEST_PAYLOAD_BYTES = 2 * 1024 * 1024; // 2 MB genuine serialized limit
 const MAX_DIAGNOSTICS_COUNT = 50;
 const MAX_DIAGNOSTICS_PAYLOAD_BYTES = 100 * 1024; // 100 KB limit
+const MAX_MEDIA_DIRECT_BYTES = 5 * 1024 * 1024; // 5 MB serialized base64 limit
+const MAX_MEDIA_CHUNK_BYTES = 2 * 1024 * 1024; // 2 MB chunk serialized base64 limit
 
 let trustedStorageConfigured = false;
 let trustedStorageError = null;
@@ -196,6 +198,8 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
         completeness_status: message.completenessStatus,
         partial_reason: message.partialReason,
         date_order: message.dateOrder,
+        target_conversation_id: message.targetConversationId || null,
+        confirm_target_merge: Boolean(message.confirmTargetMerge),
         messages: chunk
       };
 
@@ -292,6 +296,255 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
       });
 
       sendResponse({ success: res.ok });
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR" });
+    }
+    return true;
+  }
+
+  // 2b. Target Conversations Query Bridge
+  if (message.action === "bridge_get_targets") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const res = await fetchFn(`${backendUrl}/api/companion/targets`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`
+        }
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, targets: data.targets || [] });
+      } else {
+        sendResponse({ success: false, error_code: `HTTP_${res.status}`, status: res.status });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR" });
+    }
+    return true;
+  }
+
+  // 2c. Direct Media Upload Bridge
+  if (message.action === "bridge_media_upload") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const mediaPayload = {
+        conversation_id: message.conversationId || null,
+        message_id: message.messageId || null,
+        platform_msg_id: message.platformMsgId || null,
+        message_key: message.messageKey || null,
+        session_id: message.sessionId || null,
+        attachment_position: message.attachmentPosition || null,
+        chat_title: message.chatTitle || null,
+        confirm_target_merge: message.confirmTargetMerge || false,
+        file_name: message.fileName,
+        file_type: message.fileType || "document",
+        mime_type: message.mimeType || "application/octet-stream",
+        media_base64: message.mediaBase64,
+        sha256: message.sha256 || null,
+        attachment_status: message.attachmentStatus || "saved-original"
+      };
+
+      const payloadStr = JSON.stringify(mediaPayload);
+      if (calculateByteLength(payloadStr) > MAX_MEDIA_DIRECT_BYTES) {
+        sendResponse({
+          success: false,
+          error_code: "PAYLOAD_TOO_LARGE",
+          error: `Media payload exceeds direct upload limit (${MAX_MEDIA_DIRECT_BYTES} bytes)`
+        });
+        return true;
+      }
+
+      const res = await fetchFn(`${backendUrl}/api/companion/media/upload`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: payloadStr
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, data });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        sendResponse({
+          success: false,
+          error_code: `HTTP_${res.status}`,
+          status: res.status,
+          error: errData.detail || "Server error"
+        });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR", error: "Could not connect to loopback OWI" });
+    }
+    return true;
+  }
+
+  // 2d. Chunked Media Session Start Bridge
+  if (message.action === "bridge_media_session_start") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const startPayload = {
+        session_id: message.sessionId,
+        capture_session_id: message.captureSessionId || message.sessionId || null,
+        conversation_id: message.conversationId || null,
+        message_id: message.messageId || null,
+        platform_msg_id: message.platformMsgId || null,
+        message_key: message.messageKey || null,
+        attachment_position: message.attachmentPosition || null,
+        chat_title: message.chatTitle || null,
+        confirm_target_merge: message.confirmTargetMerge || false,
+        file_name: message.fileName,
+        file_type: message.fileType || "document",
+        mime_type: message.mimeType || "application/octet-stream",
+        total_bytes: message.totalBytes,
+        total_chunks: message.totalChunks,
+        sha256: message.sha256 || null,
+        attachment_status: message.attachmentStatus || "saved-original"
+      };
+
+      const res = await fetchFn(`${backendUrl}/api/companion/media/session/start`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify(startPayload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, data });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        sendResponse({ success: false, error_code: `HTTP_${res.status}`, error: errData.detail || "Server error" });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR" });
+    }
+    return true;
+  }
+
+  // 2e. Chunked Media Session Chunk Bridge
+  if (message.action === "bridge_media_session_chunk") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const chunkPayload = {
+        session_id: message.sessionId,
+        chunk_index: message.chunkIndex,
+        chunk_base64: message.chunkBase64
+      };
+
+      const payloadStr = JSON.stringify(chunkPayload);
+      if (calculateByteLength(payloadStr) > MAX_MEDIA_CHUNK_BYTES) {
+        sendResponse({
+          success: false,
+          error_code: "PAYLOAD_TOO_LARGE",
+          error: `Media chunk size exceeds limit (${MAX_MEDIA_CHUNK_BYTES} bytes)`
+        });
+        return true;
+      }
+
+      const res = await fetchFn(`${backendUrl}/api/companion/media/session/chunk`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: payloadStr
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, data });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        sendResponse({ success: false, error_code: `HTTP_${res.status}`, error: errData.detail || "Server error" });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error_code: "NETWORK_ERROR" });
+    }
+    return true;
+  }
+
+  // 2f. Chunked Media Session Finish Bridge
+  if (message.action === "bridge_media_session_finish") {
+    try {
+      const isSecured = await ensureTrustedStorage(storageLocal);
+      if (!isSecured) {
+        sendResponse({ success: false, error_code: "STORAGE_SECURITY_ERROR", error: trustedStorageError || "Storage security error" });
+        return true;
+      }
+
+      const { token, backendUrl } = await getStoredTokenAndUrl(storageLocal, storageSession);
+      if (!token || !isAllowedLoopbackUrl(backendUrl)) {
+        sendResponse({ success: false, error_code: "UNPAIRED", error: "Extension is not paired" });
+        return true;
+      }
+
+      const res = await fetchFn(`${backendUrl}/api/companion/media/session/finish`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ session_id: message.sessionId })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        sendResponse({ success: true, data });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        sendResponse({ success: false, error_code: `HTTP_${res.status}`, error: errData.detail || "Server error" });
+      }
     } catch (e) {
       sendResponse({ success: false, error_code: "NETWORK_ERROR" });
     }
@@ -418,6 +671,8 @@ if (typeof module !== "undefined" && module.exports) {
     MAX_INGEST_PAYLOAD_BYTES,
     MAX_DIAGNOSTICS_COUNT,
     MAX_DIAGNOSTICS_PAYLOAD_BYTES,
+    MAX_MEDIA_DIRECT_BYTES,
+    MAX_MEDIA_CHUNK_BYTES,
     isAllowedLoopbackUrl,
     isValidSender,
     calculateByteLength,

@@ -43,6 +43,8 @@
     "chunk_ingest_failed",
     "payload_too_large",
     "backend_unreachable",
+    "older_messages_button_unexhausted",
+    "clicked_older_messages_button",
     "auth_rejected",
     "ok"
   ];

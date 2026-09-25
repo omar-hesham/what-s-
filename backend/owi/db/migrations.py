@@ -26,10 +26,42 @@ def init_db():
             existing_msg_cols = {row[1] for row in res_msg.fetchall()}
             if existing_msg_cols and "timestamp_provenance" not in existing_msg_cols:
                 conn.execute(text("ALTER TABLE messages ADD COLUMN timestamp_provenance VARCHAR(50) DEFAULT 'verified';"))
+            if existing_msg_cols and "attachment_status" not in existing_msg_cols:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN attachment_status VARCHAR(50) DEFAULT 'none';"))
 
             conn.commit()
         except Exception as e:
             logger.warning(f"Column migration notice: {e}")
+
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS attachment_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+                    media_asset_id INTEGER REFERENCES media_assets(id) ON DELETE SET NULL,
+                    session_id VARCHAR(100),
+                    message_key VARCHAR(150),
+                    attachment_position INTEGER,
+                    file_name VARCHAR(255) NOT NULL,
+                    file_type VARCHAR(50) NOT NULL,
+                    mime_type VARCHAR(100),
+                    file_size INTEGER DEFAULT 0,
+                    sha256_hash VARCHAR(64),
+                    status VARCHAR(50) NOT NULL DEFAULT 'unavailable',
+                    reason VARCHAR(255),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            conn.commit()
+
+            res_att = conn.execute(text("PRAGMA table_info(attachment_records);"))
+            existing_att_cols = {row[1] for row in res_att.fetchall()}
+            if existing_att_cols and "attachment_position" not in existing_att_cols:
+                conn.execute(text("ALTER TABLE attachment_records ADD COLUMN attachment_position INTEGER;"))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"attachment_records table notice: {e}")
 
         try:
             conn.execute(text("""

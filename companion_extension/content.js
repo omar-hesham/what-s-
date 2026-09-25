@@ -60,6 +60,9 @@
       const toDate = config.toDate || null;
       const dateOrder = config.dateOrder || "DD/MM/YYYY";
       const chunkSize = Math.min(Math.max(config.chunkSize || 50, 1), 100);
+      const targetConversationId = config.targetConversationId || null;
+      const confirmTargetMerge = Boolean(config.confirmTargetMerge);
+      const captureMedia = config.captureMedia !== false;
 
       sendResponse({ status: "started" });
 
@@ -73,6 +76,7 @@
           stage: "initializing",
           messagesScanned: 0,
           messagesIngested: 0,
+          attachmentStats: null,
           startTime: Date.now()
         });
 
@@ -86,6 +90,10 @@
             fromDate,
             toDate,
             dateOrder,
+            sessionId,
+            targetConversationId,
+            confirmTargetMerge,
+            captureMedia,
             checkCancelled: () => cancelRequested,
             onProgress: async (prog) => {
               await updateCaptureState({
@@ -94,7 +102,8 @@
                 mode,
                 stage: prog.stage,
                 messagesScanned: prog.messagesCollected,
-                oldestDate: prog.oldestDateReached || null
+                oldestDate: prog.oldestDateReached || null,
+                attachmentStats: prog.attachmentStats || null
               });
             }
           });
@@ -112,6 +121,7 @@
               totalExtracted: 0,
               messagesIngested: 0,
               duplicatesSkipped: 0,
+              attachmentStats: result.attachmentStats || null,
               finishedAt: Date.now()
             });
             await OWIDiagnosticLogger.flushToBackend();
@@ -142,7 +152,9 @@
               completenessStatus: result.completenessStatus,
               partialReason: result.partialReason,
               sessionId,
-              dateOrder
+              dateOrder,
+              targetConversationId,
+              confirmTargetMerge
             });
 
             if (postRes && postRes.success) {
@@ -170,7 +182,8 @@
               currentChunk: i + 1,
               totalChunks: chunks.length,
               messagesScanned: result.messages.length,
-              messagesIngested: ingestedCount
+              messagesIngested: ingestedCount,
+              attachmentStats: result.attachmentStats || null
             });
           }
 
@@ -197,6 +210,7 @@
             totalExtracted: result.messages.length,
             messagesIngested: ingestedCount,
             duplicatesSkipped,
+            attachmentStats: result.attachmentStats || null,
             finishedAt: Date.now()
           };
 

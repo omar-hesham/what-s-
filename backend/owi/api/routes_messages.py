@@ -83,6 +83,20 @@ def get_conversation_messages(
                 "document": doc_info
             })
 
+        att_records_data = []
+        for att in m.attachment_records:
+            att_records_data.append({
+                "id": att.id,
+                "file_name": att.file_name,
+                "file_type": att.file_type,
+                "mime_type": att.mime_type,
+                "file_size": att.file_size,
+                "status": att.status,
+                "reason": att.reason,
+                "media_asset_id": att.media_asset_id,
+                "sha256": att.sha256_hash
+            })
+
         res.append({
             "id": m.id,
             "conversation_id": m.conversation_id,
@@ -92,8 +106,10 @@ def get_conversation_messages(
             "message_type": m.message_type,
             "has_attachment": m.has_attachment,
             "attachment_name": m.attachment_name,
+            "attachment_status": m.attachment_status,
             "source_index": m.source_index,
-            "media_assets": assets_data
+            "media_assets": assets_data,
+            "attachments": att_records_data
         })
     return res
 
@@ -154,11 +170,12 @@ async def attach_media_to_message(
         file_type=media_type,
         file_size=len(content),
         mime_type=file.content_type,
-        sha256=file_hash
+        sha256_hash=file_hash
     )
     db.add(asset)
     msg.has_attachment = True
     msg.attachment_name = safe_name
+    msg.attachment_status = "saved-original"
     if msg.message_type == "text" or not msg.message_type:
         msg.message_type = media_type
     db.commit()

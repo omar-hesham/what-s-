@@ -806,3 +806,958 @@ test("BackgroundBridge: Diagnostics logging works before pairing via bridge and 
   assert.equal(response.success, true);
   assert.equal(localStore.owi_diagnostic_logs, undefined);
 });
+
+// --- 7. Attachment Capture, Truthful Status & Target Picker Tests ---
+
+test("BulkEngine: detectMessageAttachments detects audio, video, document, and image attachments", () => {
+  const mockMsgEl = {
+    tagName: "DIV",
+    classList: { contains: () => false },
+    getAttribute: () => null,
+    querySelector: function(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll: (sel) => {
+      if (sel.includes("audio")) {
+        return [{
+          tagName: "AUDIO",
+          src: "blob:https://web.whatsapp.com/audio-uuid-1",
+          getAttribute: () => null
+        }];
+      }
+      if (sel.includes("video")) {
+        return [{
+          tagName: "VIDEO",
+          src: "blob:https://web.whatsapp.com/video-uuid-1",
+          getAttribute: () => null
+        }];
+      }
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => (attr === "data-testid" ? "document-thumb" : (attr === "title" ? "Financial_Report.pdf" : null)),
+          innerText: "Financial_Report.pdf"
+        }];
+      }
+      if (sel.includes("img[src]")) {
+        return [{
+          tagName: "IMG",
+          src: "blob:https://web.whatsapp.com/image-uuid-1",
+          getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/image-uuid-1" : null),
+          classList: { contains: () => false }
+        }];
+      }
+      return [];
+    }
+  };
+
+  const atts = BulkEngine.detectMessageAttachments(mockMsgEl, "Test Chat");
+  assert.equal(atts.length, 4);
+
+  const audioAtt = atts.find((a) => a.file_type === "audio");
+  assert.ok(audioAtt);
+  assert.equal(audioAtt.blob_url, "blob:https://web.whatsapp.com/audio-uuid-1");
+  assert.equal(audioAtt.attachment_status, "available");
+
+  const vidAtt = atts.find((a) => a.file_type === "video");
+  assert.ok(vidAtt);
+  assert.equal(vidAtt.blob_url, "blob:https://web.whatsapp.com/video-uuid-1");
+
+  const docAtt = atts.find((a) => a.file_type === "document");
+  assert.ok(docAtt);
+  assert.equal(docAtt.file_name, "Financial_Report.pdf");
+  assert.equal(docAtt.mime_type, "application/pdf");
+
+  const imgAtt = atts.find((a) => a.file_type === "image");
+  assert.ok(imgAtt);
+  assert.equal(imgAtt.blob_url, "blob:https://web.whatsapp.com/image-uuid-1");
+});
+
+test("BulkEngine: detectMessageAttachments handles multiple attachments on a single message", () => {
+  const mockAlbumEl = {
+    tagName: "DIV",
+    classList: { contains: () => false },
+    getAttribute: () => null,
+    querySelector: function(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll: (sel) => {
+      if (sel.includes("img[src]")) {
+        return [
+          {
+            tagName: "IMG",
+            src: "blob:https://web.whatsapp.com/img-1",
+            getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/img-1" : null),
+            classList: { contains: () => false }
+          },
+          {
+            tagName: "IMG",
+            src: "blob:https://web.whatsapp.com/img-2",
+            getAttribute: (attr) => (attr === "src" ? "blob:https://web.whatsapp.com/img-2" : null),
+            classList: { contains: () => false }
+          }
+        ];
+      }
+      return [];
+    }
+  };
+
+  const atts = BulkEngine.detectMessageAttachments(mockAlbumEl, "Album Chat");
+  assert.equal(atts.length, 2, "Must detect both images in the album container");
+  assert.equal(atts[0].blob_url, "blob:https://web.whatsapp.com/img-1");
+  assert.equal(atts[1].blob_url, "blob:https://web.whatsapp.com/img-2");
+});
+
+test("BulkEngine: detectMessageAttachments flags preview-only thumbnail and unsupported extensions", () => {
+  const mockEl = {
+    tagName: "DIV",
+    classList: { contains: () => false },
+    getAttribute: () => null,
+    querySelector: function(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => (attr === "title" ? "trojan.exe" : (attr === "data-testid" ? "document-thumb" : null)),
+          innerText: "trojan.exe"
+        }];
+      }
+      if (sel.includes("img[src]")) {
+        return [{
+          tagName: "IMG",
+          src: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", // Small preview data URI
+          getAttribute: (attr) => (attr === "src" ? "data:image/jpeg;base64,/9j/4AAQSkZJRg==" : null),
+          classList: { contains: (c) => c === "thumbnail" }
+        }];
+      }
+      return [];
+    }
+  };
+
+  const atts = BulkEngine.detectMessageAttachments(mockEl, "Security Test");
+  assert.equal(atts.length, 2);
+
+  const doc = atts.find((a) => a.file_name === "trojan.exe");
+  assert.ok(doc);
+  assert.equal(doc.attachment_status, "unsupported", ".exe must be flagged unsupported");
+
+  const img = atts.find((a) => a.file_type === "image");
+  assert.ok(img);
+  assert.equal(img.is_thumbnail_only, true);
+  assert.equal(img.attachment_status, "preview-only");
+});
+
+test("BulkEngine: Bounded chunking and memory-safe base64 conversion", () => {
+  const rawData = new Uint8Array(500 * 1024); // 500 KB
+  for (let i = 0; i < rawData.length; i++) {
+    rawData[i] = i % 256;
+  }
+
+  const chunks = BulkEngine.sliceIntoChunks(rawData, 128 * 1024);
+  assert.equal(chunks.length, 4, "500 KB / 128 KB should produce 4 chunks");
+  assert.equal(chunks[0].byteLength, 128 * 1024);
+  assert.equal(chunks[3].byteLength, 116 * 1024);
+
+  const b64 = BulkEngine.uint8ArrayToBase64(rawData);
+  assert.ok(b64.length > 0);
+  const decoded = Buffer.from(b64, "base64");
+  assert.equal(decoded.length, rawData.length);
+  assert.equal(decoded[0], rawData[0]);
+  assert.equal(decoded[decoded.length - 1], rawData[rawData.length - 1]);
+});
+
+test("BulkEngine: captureAttachmentOriginalBytes truthfully distinguishes statuses", async () => {
+  // 1. Saved original from blob
+  const sampleBytes = Buffer.from("OWI Original Audio Bytes 2026", "utf-8");
+  const mockFetchOk = async () => ({
+    ok: true,
+    blob: async () => ({
+      size: sampleBytes.length,
+      type: "audio/ogg",
+      arrayBuffer: async () => sampleBytes.buffer
+    })
+  });
+
+  const resOk = await BulkEngine.captureAttachmentOriginalBytes(
+    {
+      file_name: "voice.ogg",
+      file_type: "audio",
+      mime_type: "audio/ogg",
+      blob_url: "blob:https://web.whatsapp.com/voice-1",
+      is_thumbnail_only: false
+    },
+    { fetchFn: mockFetchOk }
+  );
+
+  assert.equal(resOk.status, "saved-original");
+  assert.equal(resOk.file_size, sampleBytes.length);
+  assert.ok(resOk.sha256);
+
+  // 2. Preview only - never claim saved-original
+  const resPreview = await BulkEngine.captureAttachmentOriginalBytes(
+    {
+      file_name: "thumb.jpg",
+      file_type: "image",
+      mime_type: "image/jpeg",
+      blob_url: "blob:https://web.whatsapp.com/thumb-1",
+      is_thumbnail_only: true // Explicit preview
+    },
+    { fetchFn: mockFetchOk }
+  );
+
+  assert.equal(resPreview.status, "preview-only", "Thumbnail must be marked preview-only, never saved-original");
+
+  // 3. Expired blob (404/revoked)
+  const mockFetch404 = async () => ({ ok: false, status: 404 });
+  const resExpired = await BulkEngine.captureAttachmentOriginalBytes(
+    {
+      file_name: "expired.pdf",
+      file_type: "document",
+      blob_url: "blob:https://web.whatsapp.com/expired-1"
+    },
+    { fetchFn: mockFetch404 }
+  );
+  assert.equal(resExpired.status, "expired");
+
+  // 4. Too large
+  const mockFetchTooLarge = async () => ({
+    ok: true,
+    blob: async () => ({
+      size: 100 * 1024 * 1024, // 100 MB
+      arrayBuffer: async () => new ArrayBuffer(0)
+    })
+  });
+  const resTooLarge = await BulkEngine.captureAttachmentOriginalBytes(
+    {
+      file_name: "huge_video.mp4",
+      file_type: "video",
+      blob_url: "blob:https://web.whatsapp.com/video-huge"
+    },
+    { fetchFn: mockFetchTooLarge, maxBytes: 50 * 1024 * 1024 }
+  );
+  assert.equal(resTooLarge.status, "too-large");
+
+  // 5. Unsupported format
+  const resUnsupported = await BulkEngine.captureAttachmentOriginalBytes({
+    file_name: "script.bat",
+    file_type: "document",
+    blob_url: "blob:https://web.whatsapp.com/script-1"
+  });
+  assert.equal(resUnsupported.status, "unsupported");
+});
+
+test("BulkEngine: uploadCapturedMediaItem uploads direct (<=2MB) and cleans up in-memory bytes", async () => {
+  const dummyBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const att = {
+    file_name: "photo.jpg",
+    file_type: "image",
+    mime_type: "image/jpeg",
+    file_size: dummyBytes.byteLength,
+    attachment_status: "saved-original",
+    sha256: "abc123sha",
+    bytes: dummyBytes
+  };
+
+  let bridgePayload = null;
+  const mockSender = async (payload) => {
+    bridgePayload = payload;
+    return { success: true, data: { asset_id: 42 } };
+  };
+
+  const res = await BulkEngine.uploadCapturedMediaItem({
+    attachment: att,
+    conversationId: 13,
+    platformMsgId: "msg_123",
+    chatTitle: "H",
+    bridgeSender: mockSender,
+    maxDirectBytes: 2 * 1024 * 1024
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(att.attachment_status, "saved-original");
+  assert.equal(att.bytes, null, "Bytes must be cleared to prevent in-memory leaks");
+  assert.equal(bridgePayload.action, "bridge_media_upload");
+  assert.equal(bridgePayload.conversationId, 13);
+  assert.equal(bridgePayload.platformMsgId, "msg_123");
+});
+
+test("BulkEngine: uploadCapturedMediaItem uploads via session (>2MB) in bounded chunks", async () => {
+  const dummyBytes = new Uint8Array(3 * 1024 * 1024); // 3 MB > 2 MB cap
+  const att = {
+    file_name: "big_video.mp4",
+    file_type: "video",
+    mime_type: "video/mp4",
+    file_size: dummyBytes.byteLength,
+    attachment_status: "saved-original",
+    sha256: "sha_vid_777",
+    bytes: dummyBytes
+  };
+
+  const sentActions = [];
+  const mockSender = async (payload) => {
+    sentActions.push(payload.action);
+    return { success: true, data: { status: "success" } };
+  };
+
+  const res = await BulkEngine.uploadCapturedMediaItem({
+    attachment: att,
+    conversationId: 13,
+    bridgeSender: mockSender,
+    maxDirectBytes: 2 * 1024 * 1024,
+    chunkSize: 1024 * 1024 // 1 MB chunk
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(att.bytes, null);
+  assert.equal(sentActions[0], "bridge_media_session_start");
+  assert.ok(sentActions.includes("bridge_media_session_chunk"));
+  assert.equal(sentActions[sentActions.length - 1], "bridge_media_session_finish");
+});
+
+test("BulkEngine: postChunkWithRetry passes targetConversationId, confirmTargetMerge, and attachment metadata", async () => {
+  let forwardedPayload = null;
+  const mockSender = async (p) => {
+    forwardedPayload = p;
+    return { success: true, data: { messages_ingested: 1 } };
+  };
+
+  const res = await BulkEngine.postChunkWithRetry({
+    chatTitle: "WhatsApp Web H",
+    chunk: [
+      {
+        sender: "H",
+        text: "Document attached",
+        timestamp: "2026-09-25T10:00:00",
+        platform_msg_id: "p_msg_99",
+        has_media: true,
+        media_type: "document",
+        media_filename: "Contract.pdf",
+        attachment_status: "saved-original",
+        attachments: [
+          {
+            file_name: "Contract.pdf",
+            file_type: "document",
+            mime_type: "application/pdf",
+            file_size: 15000,
+            sha256: "sha_contract_123",
+            attachment_status: "saved-original"
+          }
+        ]
+      }
+    ],
+    chunkIndex: 0,
+    totalChunks: 1,
+    isLastChunk: true,
+    targetConversationId: 13,
+    confirmTargetMerge: true,
+    bridgeSender: mockSender
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(forwardedPayload.targetConversationId, 13);
+  assert.equal(forwardedPayload.confirmTargetMerge, true);
+  assert.equal(forwardedPayload.chunk[0].attachment_status, "saved-original");
+  assert.equal(forwardedPayload.chunk[0].attachments.length, 1);
+  assert.equal(forwardedPayload.chunk[0].attachments[0].file_name, "Contract.pdf");
+});
+
+test("BackgroundBridge: Target picker query bridge returns target list from backend", async () => {
+  const localStore = { owi_token: "token_abc", owi_backend_url: "http://127.0.0.1:8765" };
+  const mockLocal = {
+    setAccessLevel: async () => {},
+    get: async () => localStore
+  };
+
+  const mockFetch = async (url) => {
+    assert.ok(url.endsWith("/api/companion/targets"));
+    return {
+      ok: true,
+      json: async () => ({
+        targets: [
+          { id: 13, title: "H", source_type: "export_zip", message_count: 197 },
+          { id: 14, title: "Work Group", source_type: "companion", message_count: 50 }
+        ]
+      })
+    };
+  };
+
+  let response = null;
+  const sendResponse = (res) => { response = res; };
+  const validPopupSender = { id: "ext123", url: "chrome-extension://ext123/popup.html" };
+
+  await BackgroundBridge.handleRuntimeMessage(
+    { action: "bridge_get_targets" },
+    validPopupSender,
+    sendResponse,
+    { storageLocal: mockLocal, fetchFn: mockFetch, trustedStorageConfigured: true }
+  );
+
+  assert.equal(response.success, true);
+  assert.equal(response.targets.length, 2);
+  assert.equal(response.targets[0].id, 13);
+  assert.equal(response.targets[0].source_type, "export_zip");
+  assert.equal(response.targets[0].message_count, 197);
+});
+
+// --- 7. Reviewer Delta Synthetic Tests (P0 1 - P0 4) ---
+
+test("BulkEngine: runBulkCapture wires media upload parameters through initial viewport and virtualized scroll", async () => {
+  const bridgeCalls = [];
+  const mockSender = async (p) => {
+    bridgeCalls.push(p);
+    return { success: true, data: { asset_id: bridgeCalls.length } };
+  };
+
+  const fakeFetch = async (url) => {
+    const data = Buffer.from("PDF content for " + url);
+    return {
+      ok: true,
+      blob: async () => ({
+        size: data.length,
+        type: "application/pdf",
+        arrayBuffer: async () => data.buffer
+      })
+    };
+  };
+
+  const mockDoc = {
+    querySelector: (sel) => {
+      if (sel.includes("conversation-info-header") || sel.includes("header")) {
+        return { innerText: "H", getAttribute: () => "H" };
+      }
+      return null;
+    }
+  };
+
+  const createMsgNode = (id, timeStr, text, blobUrl, fileName) => ({
+    getAttribute: (attr) => (attr === "data-id" ? id : null),
+    classList: { contains: (cls) => cls === "message-in" },
+    getBoundingClientRect: () => ({ top: 10, bottom: 50 }),
+    innerText: text,
+    querySelector: (sel) => {
+      if (sel.includes("selectable-text") || sel.includes("copyable-text")) {
+        return { innerText: text, getAttribute: () => `[${timeStr}] Omar: ` };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document") || sel.includes(".")) {
+        return [{
+          getAttribute: (attr) => (attr === "title" ? fileName : null),
+          innerText: fileName,
+          tagName: "DIV",
+          parentElement: null,
+          querySelector: (s) => (s.includes("a[href") ? { href: blobUrl } : null)
+        }];
+      }
+      return [];
+    }
+  });
+
+  const node1 = createMsgNode("wam_doc_1", "10:00, 25/09/2026", "Doc 1 attached", "blob:http://localhost/doc1", "doc1.pdf");
+  const node2 = createMsgNode("wam_doc_2", "10:05, 25/09/2026", "Doc 2 attached", "blob:http://localhost/doc2", "doc2.pdf");
+
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 400,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelectorAll: () => {
+      if (mockContainer.scrollTop === 0) {
+        return [node1];
+      } else {
+        return [node2];
+      }
+    }
+  };
+
+  const captureSessionId = "sess_bulk_test_42";
+  const result = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: mockDoc,
+    mode: "visible_to_newest",
+    captureMedia: true,
+    targetConversationId: 13,
+    confirmTargetMerge: true,
+    sessionId: captureSessionId,
+    bridgeSender: mockSender,
+    fetchFn: fakeFetch,
+    maxScrollAttempts: 3,
+    scrollDelayMs: 2
+  });
+
+  assert.equal(result.messages.length, 2);
+  const mediaUploads = bridgeCalls.filter(c => c.action === "bridge_media_upload");
+  assert.equal(mediaUploads.length, 2);
+
+  // Assert ALL worker bridge payloads include the same target, confirmation, session
+  for (const upload of mediaUploads) {
+    assert.equal(upload.conversationId, 13);
+    assert.equal(upload.confirmTargetMerge, true);
+    assert.equal(upload.sessionId, captureSessionId);
+    assert.ok(upload.messageKey);
+    assert.ok(upload.attachmentPosition >= 1);
+  }
+
+  assert.equal(mediaUploads[0].messageKey, "wam_doc_1");
+  assert.equal(mediaUploads[1].messageKey, "wam_doc_2");
+});
+
+test("BulkEngine: >2MB attachment chunked upload uses single uploadSessionId across start/chunk/finish and carries captureSessionId", async () => {
+  const bridgeCalls = [];
+  const mockSender = async (p) => {
+    bridgeCalls.push(p);
+    return { success: true, data: { status: "session_finished" } };
+  };
+
+  const largeBytes = new Uint8Array(2.5 * 1024 * 1024);
+  largeBytes.fill(65);
+
+  const att1 = {
+    id: "att_1",
+    file_type: "document",
+    file_name: "large_blueprint.pdf",
+    mime_type: "application/pdf",
+    bytes: largeBytes,
+    file_size: largeBytes.byteLength,
+    attachment_status: "saved-original",
+    sha256: "sha_large_123"
+  };
+
+  const captureSessionId = "capture_sess_abc";
+
+  const res1 = await BulkEngine.uploadCapturedMediaItem({
+    attachment: att1,
+    attachmentPosition: 1,
+    conversationId: 13,
+    confirmTargetMerge: true,
+    platformMsgId: "msg_large_1",
+    messageKey: "msg_large_1",
+    sessionId: captureSessionId,
+    bridgeSender: mockSender,
+    maxDirectBytes: 2 * 1024 * 1024,
+    chunkSize: 1024 * 1024
+  });
+
+  assert.equal(res1.success, true);
+  assert.equal(res1.status, "saved-original");
+
+  const startCalls = bridgeCalls.filter(c => c.action === "bridge_media_session_start");
+  const chunkCalls = bridgeCalls.filter(c => c.action === "bridge_media_session_chunk");
+  const finishCalls = bridgeCalls.filter(c => c.action === "bridge_media_session_finish");
+
+  assert.equal(startCalls.length, 1);
+  assert.ok(chunkCalls.length >= 2);
+  assert.equal(finishCalls.length, 1);
+
+  const uploadSessId1 = startCalls[0].sessionId;
+  assert.ok(uploadSessId1.startsWith("media_upload_"));
+  assert.equal(startCalls[0].capture_session_id, captureSessionId);
+  assert.equal(startCalls[0].conversationId, 13);
+  assert.equal(startCalls[0].confirmTargetMerge, true);
+
+  for (const chunk of chunkCalls) {
+    assert.equal(chunk.sessionId, uploadSessId1, "All chunks must use uploadSessionId, not captureSessionId or null");
+  }
+  assert.equal(finishCalls[0].sessionId, uploadSessId1, "Finish must use uploadSessionId, not captureSessionId or null");
+
+  // Second attachment in same capture session
+  const att2 = {
+    id: "att_2",
+    file_type: "video",
+    file_name: "large_video.mp4",
+    mime_type: "video/mp4",
+    bytes: largeBytes,
+    file_size: largeBytes.byteLength,
+    attachment_status: "saved-original",
+    sha256: "sha_video_456"
+  };
+
+  const res2 = await BulkEngine.uploadCapturedMediaItem({
+    attachment: att2,
+    attachmentPosition: 2,
+    conversationId: 13,
+    confirmTargetMerge: true,
+    platformMsgId: "msg_large_1",
+    messageKey: "msg_large_1",
+    sessionId: captureSessionId,
+    bridgeSender: mockSender,
+    maxDirectBytes: 2 * 1024 * 1024,
+    chunkSize: 1024 * 1024
+  });
+
+  assert.equal(res2.success, true);
+  const startCalls2 = bridgeCalls.filter(c => c.action === "bridge_media_session_start");
+  assert.equal(startCalls2.length, 2);
+  const uploadSessId2 = startCalls2[1].sessionId;
+  assert.notEqual(uploadSessId1, uploadSessId2, "Distinct attachments must use distinct uploadSessionIds");
+  assert.equal(startCalls2[1].capture_session_id, captureSessionId, "Both must carry same captureSessionId");
+});
+
+test("BulkEngine: Never upgrades preview/thumbnail to saved-original and preserves truthful status", async () => {
+  // 1. Data URI preview
+  const dataUriAtt = {
+    id: "att_thumb_data",
+    file_type: "image",
+    file_name: "thumbnail.jpg",
+    mime_type: "image/jpeg",
+    blob_url: "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+    is_thumbnail_only: true,
+    attachment_status: "preview-only"
+  };
+
+  const resData = await BulkEngine.captureAttachmentOriginalBytes(dataUriAtt);
+  assert.equal(resData.status, "preview-only");
+
+  dataUriAtt.attachment_status = resData.status;
+  dataUriAtt.bytes = resData.bytes;
+  let bridgeCalled = false;
+  const mockSender = async () => { bridgeCalled = true; return { success: true }; };
+  const uploadResData = await BulkEngine.uploadCapturedMediaItem({
+    attachment: dataUriAtt,
+    bridgeSender: mockSender
+  });
+  assert.equal(uploadResData.success, false);
+  assert.equal(uploadResData.status, "preview-only");
+  assert.equal(bridgeCalled, false, "Must never bridge-upload preview-only bytes as original");
+
+  // 2. Blob in-chat thumbnail with is_thumbnail_only
+  const fakeBlobFetch = async () => ({
+    ok: true,
+    blob: async () => ({
+      size: 500,
+      type: "image/jpeg",
+      arrayBuffer: async () => new Uint8Array(500).buffer
+    })
+  });
+
+  const blobThumbAtt = {
+    id: "att_thumb_blob",
+    file_type: "image",
+    file_name: "thumb_blob.jpg",
+    mime_type: "image/jpeg",
+    blob_url: "blob:http://localhost/thumb1",
+    is_thumbnail_only: true,
+    attachment_status: "preview-only"
+  };
+
+  const resBlobThumb = await BulkEngine.captureAttachmentOriginalBytes(blobThumbAtt, { fetchFn: fakeBlobFetch });
+  assert.equal(resBlobThumb.status, "preview-only");
+
+  blobThumbAtt.attachment_status = resBlobThumb.status;
+  blobThumbAtt.bytes = resBlobThumb.bytes;
+  const uploadResBlob = await BulkEngine.uploadCapturedMediaItem({
+    attachment: blobThumbAtt,
+    bridgeSender: mockSender
+  });
+  assert.equal(uploadResBlob.success, false);
+  assert.equal(uploadResBlob.status, "preview-only");
+  assert.equal(bridgeCalled, false);
+
+  // 3. True full-size document: succeeds as saved-original
+  const fullDocAtt = {
+    id: "att_full_doc",
+    file_type: "document",
+    file_name: "contract.pdf",
+    mime_type: "application/pdf",
+    blob_url: "blob:http://localhost/contract",
+    is_thumbnail_only: false,
+    attachment_status: "available"
+  };
+
+  const resFullDoc = await BulkEngine.captureAttachmentOriginalBytes(fullDocAtt, { fetchFn: fakeBlobFetch });
+  assert.equal(resFullDoc.status, "saved-original");
+  assert.ok(resFullDoc.bytes);
+
+  fullDocAtt.attachment_status = resFullDoc.status;
+  fullDocAtt.bytes = resFullDoc.bytes;
+  const uploadResFull = await BulkEngine.uploadCapturedMediaItem({
+    attachment: fullDocAtt,
+    bridgeSender: mockSender
+  });
+  assert.equal(uploadResFull.success, true);
+  assert.equal(uploadResFull.status, "saved-original");
+  assert.equal(bridgeCalled, true);
+});
+
+test("BulkEngine: Detects older messages button, clicks repeatedly, and reports older_messages_button_unexhausted if unexhausted", async () => {
+  let olderBtnClicks = 0;
+  let olderBtnVisible = true;
+
+  // Broad ancestor div whose text merely contains the phrase (e.g. chat container / wrapper)
+  // Must NEVER be selected or clicked!
+  const mockBroadAncestorDiv = {
+    tagName: "DIV",
+    innerText: "Earlier messages in H chat...\nClick here to get older messages from your phone.\nLater messages...",
+    textContent: "Earlier messages in H chat...\nClick here to get older messages from your phone.\nLater messages...",
+    getAttribute: (attr) => (attr === "class" ? "chat-container" : null),
+    closest: (sel) => null,
+    click: () => {
+      throw new Error("Broad ancestor div must never be clicked as the older messages button!");
+    }
+  };
+
+  // The actual interactive button (or closest actionable ancestor)
+  const mockActionableBtn = {
+    tagName: "DIV",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: (attr) => (attr === "role" ? "button" : null),
+    closest: function (sel) {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return mockActionableBtn;
+      }
+      return null;
+    },
+    click: () => {
+      olderBtnClicks++;
+      if (olderBtnClicks >= 2) {
+        olderBtnVisible = false;
+      }
+    }
+  };
+
+  // Inner span inside the button whose closest("button, [role='button']") resolves to mockActionableBtn
+  const mockInnerSpan = {
+    tagName: "SPAN",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: () => null,
+    closest: function (sel) {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return mockActionableBtn;
+      }
+      return null;
+    },
+    click: () => {
+      mockActionableBtn.click();
+    }
+  };
+
+  const mockDoc = {
+    querySelector: (sel) => {
+      if (sel.includes("conversation-info-header") || sel.includes("header")) {
+        return { innerText: "H", getAttribute: () => "H" };
+      }
+      if (olderBtnVisible && (sel.includes("button") || sel.includes("[role='button']"))) {
+        return mockActionableBtn;
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return olderBtnVisible ? [mockActionableBtn] : [];
+      }
+      if (sel.includes("span")) {
+        return olderBtnVisible ? [mockInnerSpan] : [];
+      }
+      if (sel.includes("div")) {
+        // Broad ancestor div comes first in document order!
+        return olderBtnVisible ? [mockBroadAncestorDiv, mockActionableBtn] : [mockBroadAncestorDiv];
+      }
+      return [];
+    }
+  };
+
+  let scrollUpCalls = 0;
+  const mockContainer = {
+    scrollTop: 0,
+    scrollHeight: 500,
+    clientHeight: 200,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelector: () => null,
+    querySelectorAll: (sel = "") => {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return olderBtnVisible ? [mockActionableBtn] : [];
+      }
+      if (sel.includes("span")) {
+        return olderBtnVisible ? [mockInnerSpan] : [];
+      }
+      if (sel.includes("div") && !sel.includes("data-id") && !sel.includes("message")) {
+        return olderBtnVisible ? [mockBroadAncestorDiv, mockActionableBtn] : [mockBroadAncestorDiv];
+      }
+      scrollUpCalls++;
+      const day = String(Math.max(18, 25 - (scrollUpCalls - 1) * 2)).padStart(2, '0');
+      return [
+        {
+          getAttribute: (attr) => (attr === "data-id" ? `msg_older_${scrollUpCalls}` : null),
+          classList: { contains: () => false },
+          getBoundingClientRect: () => ({ top: 10, bottom: 30 }),
+          querySelector: () => ({ innerText: `Older message ${scrollUpCalls}`, getAttribute: () => `[23:59, ${day}/09/2026] User: ` })
+        }
+      ];
+    }
+  };
+
+  // 1. When older messages button is exhausted after clicks, completes successfully
+  const resExhausted = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: mockDoc,
+    mode: "date_range",
+    fromDate: "2026-09-19T00:00:00",
+    toDate: "2026-09-25T23:59:00",
+    maxScrollAttempts: 5,
+    scrollDelayMs: 2
+  });
+
+  assert.ok(olderBtnClicks >= 2, "Must activate older messages button repeatedly");
+  assert.equal(resExhausted.completenessStatus, "complete");
+
+  // 2. If older messages button remains visible when scrolling stops at top, must report partial with older_messages_button_unexhausted
+  olderBtnVisible = true;
+  olderBtnClicks = 0;
+  const mockUnexhaustedBtn = {
+    tagName: "DIV",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: (attr) => (attr === "role" ? "button" : null),
+    closest: (sel) => (sel.includes("button") || sel.includes("[role='button']") ? mockUnexhaustedBtn : null),
+    click: () => { olderBtnClicks++; }
+  };
+  const mockDocUnexhausted = {
+    querySelector: (sel) => {
+      if (sel.includes("conversation-info-header") || sel.includes("header")) {
+        return { innerText: "H", getAttribute: () => "H" };
+      }
+      return mockUnexhaustedBtn;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return [mockUnexhaustedBtn];
+      }
+      if (sel.includes("span")) {
+        return [mockUnexhaustedBtn];
+      }
+      if (sel.includes("div")) {
+        return [mockBroadAncestorDiv, mockUnexhaustedBtn];
+      }
+      return [];
+    }
+  };
+
+  const resUnexhausted = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: mockDocUnexhausted,
+    mode: "date_range",
+    fromDate: "2026-09-01T00:00:00",
+    toDate: "2026-09-25T23:59:59",
+    maxScrollAttempts: 3,
+    scrollDelayMs: 2
+  });
+
+  assert.equal(resUnexhausted.completenessStatus, "partial");
+  assert.equal(resUnexhausted.partialReason, "older_messages_button_unexhausted");
+});
+
+test("BulkEngine: findOlderMessagesButton selects actionable button and never selects broad ancestor div", () => {
+  const mockBroadAncestorDiv = {
+    tagName: "DIV",
+    innerText: "Messages...\nClick here to get older messages from your phone.\nMore...",
+    textContent: "Messages...\nClick here to get older messages from your phone.\nMore...",
+    getAttribute: (attr) => (attr === "class" ? "chat-container" : null),
+    closest: () => null,
+    click: () => { throw new Error("Must never click broad ancestor div"); }
+  };
+
+  const mockActionableBtn = {
+    tagName: "DIV",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: (attr) => (attr === "role" ? "button" : null),
+    closest: (sel) => (sel.includes("button") || sel.includes("[role='button']") ? mockActionableBtn : null),
+    click: () => {}
+  };
+
+  const mockInnerSpan = {
+    tagName: "SPAN",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: () => null,
+    closest: (sel) => (sel.includes("button") || sel.includes("[role='button']") ? mockActionableBtn : null)
+  };
+
+  const mockDocWithBoth = {
+    querySelectorAll: (sel) => {
+      if (sel.includes("button") || sel.includes("[role='button']")) {
+        return [mockActionableBtn];
+      }
+      if (sel.includes("span")) {
+        return [mockInnerSpan];
+      }
+      if (sel.includes("div")) {
+        return [mockBroadAncestorDiv, mockActionableBtn];
+      }
+      return [];
+    }
+  };
+
+  // 1. Selects actionable button, not broad ancestor div
+  const btn = BulkEngine.findOlderMessagesButton(null, mockDocWithBoth);
+  assert.equal(btn, mockActionableBtn);
+
+  // 2. When only broad ancestor div is present, returns null (never selects broad div)
+  const mockDocOnlyBroad = {
+    querySelectorAll: (sel) => {
+      if (sel.includes("div")) {
+        return [mockBroadAncestorDiv];
+      }
+      return [];
+    }
+  };
+  const nullBtn = BulkEngine.findOlderMessagesButton(null, mockDocOnlyBroad);
+  assert.equal(nullBtn, null);
+});
+
+test("BulkEngine: Older messages button clicking is bounded and cancellation-safe", async () => {
+  let olderClicks = 0;
+  let cancelled = false;
+
+  const mockActionableBtn = {
+    tagName: "BUTTON",
+    innerText: "Click here to get older messages from your phone.",
+    textContent: "Click here to get older messages from your phone.",
+    getAttribute: () => null,
+    closest: () => mockActionableBtn,
+    click: () => {
+      olderClicks++;
+      if (olderClicks >= 1) {
+        cancelled = true;
+      }
+    }
+  };
+
+  const mockDoc = {
+    querySelector: (sel) => ({ innerText: "H", getAttribute: () => "H" }),
+    querySelectorAll: (sel) => {
+      if (sel.includes("button") || sel.includes("[role='button']")) return [mockActionableBtn];
+      return [];
+    }
+  };
+
+  const mockContainer = {
+    scrollTop: 0,
+    scrollHeight: 500,
+    clientHeight: 200,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelector: () => null,
+    querySelectorAll: () => [
+      {
+        getAttribute: (attr) => (attr === "data-id" ? "msg_cancel" : null),
+        classList: { contains: () => false },
+        getBoundingClientRect: () => ({ top: 10, bottom: 30 }),
+        querySelector: () => ({ innerText: "Msg", getAttribute: () => "[10:00, 24/09/2026] User: " })
+      }
+    ]
+  };
+
+  const res = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: mockDoc,
+    mode: "date_range",
+    fromDate: "2026-09-01T00:00:00",
+    toDate: "2026-09-25T23:59:59",
+    maxScrollAttempts: 5,
+    scrollDelayMs: 2,
+    checkCancelled: () => cancelled
+  });
+
+  assert.equal(res.completenessStatus, "partial");
+  assert.equal(res.partialReason, "cancelled_by_user");
+  assert.equal(olderClicks, 1, "Must immediately halt clicking upon cancellation");
+});

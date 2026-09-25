@@ -294,6 +294,22 @@
         <option value="MM/DD/YYYY">شهر / يوم / سنة (النظام الأمريكي)</option>
       </select>
 
+      <label for="target-conversation-select">محادثة الوجهة في OWI (Target Conversation):</label>
+      <select id="target-conversation-select">
+        <option value="new">-- إنشاء محادثة رفيق جديدة (تلقائي) --</option>
+      </select>
+
+      <div id="imported-target-warning" style="display: none; background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 6px; padding: 8px; margin-bottom: 8px;">
+        <div style="font-size: 11px; color: #fbbf24; font-weight: 600; margin-bottom: 4px;">⚠️ دمج مع محادثة مستوردة (Imported Archive)</div>
+        <div style="font-size: 10.5px; color: #e2e8f0; line-height: 1.4; margin-bottom: 6px;">
+          أنت على وشك إثراء محادثة مستوردة من أرشيف مضغوط. سيتم ربط المرفقات بالرسائل الأصلية بأمان وتفادي أي تكرار.
+        </div>
+        <label class="radio-label" style="font-size: 11px; color: #fef08a;">
+          <input type="checkbox" id="confirm-merge-check">
+          <span>أؤكد رغبتي في دمج الوسائط والمرفقات مع هذه المحادثة</span>
+        </label>
+      </div>
+
       <button id="start-bulk-btn" class="btn btn-green">📥 بدء الالتقاط الشامل (Bulk Capture)</button>
     </div>
 

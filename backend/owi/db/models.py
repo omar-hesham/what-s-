@@ -52,6 +52,7 @@ class Conversation(Base):
     commitments = relationship("Commitment", back_populates="conversation", cascade="all, delete-orphan")
     properties = relationship("Property", back_populates="conversation", cascade="all, delete-orphan")
     research_items = relationship("ResearchItem", back_populates="conversation", cascade="all, delete-orphan")
+    attachment_records = relationship("AttachmentRecord", back_populates="conversation", cascade="all, delete-orphan")
 
 class Participant(Base):
     """Chat participant / contact."""
@@ -78,6 +79,7 @@ class Message(Base):
     raw_text = Column(Text, nullable=True)
     has_attachment = Column(Boolean, default=False)
     attachment_name = Column(String(255), nullable=True)
+    attachment_status = Column(String(50), default="none", nullable=True)  # saved-original, preview-only, unavailable, expired, too-large, failed, unsupported, none
     source_index = Column(Integer, default=0)
     timestamp_provenance = Column(String(50), default="verified", nullable=True)  # verified, unverified_fallback
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -85,6 +87,7 @@ class Message(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
     media_assets = relationship("MediaAsset", back_populates="message", cascade="all, delete-orphan")
+    attachment_records = relationship("AttachmentRecord", back_populates="message", cascade="all, delete-orphan")
     tasks = relationship("Task", back_populates="message")
     decisions = relationship("Decision", back_populates="message")
     commitments = relationship("Commitment", back_populates="message")
@@ -111,8 +114,38 @@ class MediaAsset(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="media_assets")
     message = relationship("Message", back_populates="media_assets")
+    attachment_records = relationship("AttachmentRecord", back_populates="media_asset")
     transcript = relationship("Transcript", uselist=False, back_populates="media_asset", cascade="all, delete-orphan")
     document_record = relationship("DocumentRecord", uselist=False, back_populates="media_asset", cascade="all, delete-orphan")
+
+class AttachmentRecord(Base):
+    """
+    Durable per-attachment capture record linked to Message and capture session.
+    Tracks every detected attachment with per-file status:
+    saved-original, preview-only, unavailable, expired, too-large, failed, unsupported.
+    """
+    __tablename__ = "attachment_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=True, index=True)
+    media_asset_id = Column(Integer, ForeignKey("media_assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    session_id = Column(String(100), nullable=True, index=True)
+    message_key = Column(String(150), nullable=True, index=True)
+    attachment_position = Column(Integer, nullable=True)
+    file_name = Column(String(255), nullable=False)
+    file_type = Column(String(50), nullable=False)  # audio, image, video, document, other
+    mime_type = Column(String(100), nullable=True)
+    file_size = Column(Integer, default=0)
+    sha256_hash = Column(String(64), nullable=True, index=True)
+    status = Column(String(50), nullable=False, default="unavailable")  # saved-original, preview-only, unavailable, expired, too-large, failed, unsupported
+    reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    conversation = relationship("Conversation", back_populates="attachment_records")
+    message = relationship("Message", back_populates="attachment_records")
+    media_asset = relationship("MediaAsset", back_populates="attachment_records")
 
 class Transcript(Base):
     """Audio/video speech transcript produced by local Whisper engine."""

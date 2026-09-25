@@ -4,6 +4,7 @@ Grounds all responses in local SQLite records (messages, transcripts, documents,
 with mandatory local source citations. Never fabricates answers without evidence.
 """
 
+import re
 from typing import Dict, Any, List, Optional
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
@@ -123,7 +124,7 @@ class AskWhatsAppEngine:
                 return {"answer": answer, "citations": citations}
 
         # 5. Hybrid Retrieval: FTS5 + Semantic Search over Messages
-        search_terms = [t for t in query.split() if len(t) > 2]
+        search_terms = [t for t in re.findall(r"\w+", query) if len(t) > 1]
         fts_messages = []
         if search_terms:
             try:
@@ -143,6 +144,54 @@ class AskWhatsAppEngine:
             except Exception as e:
                 logger.warning(f"FTS search notice: {e}")
 
+        # Search verified derived attachment text (transcripts, OCR, documents)
+        derived_citations = []
+        der_res = []
+        if search_terms:
+            try:
+                fts_query_str = " OR ".join(f'"{t}"' for t in search_terms)
+                sql_der = text("""
+                    SELECT media_asset_id, message_id, conversation_id, file_name, source_type, content
+                    FROM derived_fts
+                    WHERE derived_fts MATCH :query
+                    LIMIT 6;
+                """)
+                der_res = db.execute(sql_der, {"query": fts_query_str}).fetchall()
+            except Exception as e:
+                logger.warning(f"Derived FTS retrieval notice: {e}")
+
+        if not der_res:
+            try:
+                # Substring/LIKE fallback for derived content
+                for st in search_terms:
+                    sql_der_like = text("""
+                        SELECT media_asset_id, message_id, conversation_id, file_name, source_type, content
+                        FROM derived_fts
+                        WHERE content LIKE :like_q
+                        LIMIT 6;
+                    """)
+                    der_res = db.execute(sql_der_like, {"like_q": f"%{st}%"}).fetchall()
+                    if der_res:
+                        break
+            except Exception as e:
+                logger.warning(f"Derived LIKE retrieval notice: {e}")
+
+        for aid, mid, cid, fname, stype, d_text in der_res:
+            if conversation_id and cid != conversation_id:
+                continue
+            m_linked = db.query(Message).filter(Message.id == mid).first() if mid else None
+            derived_citations.append({
+                "source_origin": "derived",
+                "source_type": stype,
+                "media_asset_id": aid,
+                "message_id": mid,
+                "conversation_id": cid,
+                "file_name": fname,
+                "sender": m_linked.sender_name if m_linked else "Attachment",
+                "timestamp": m_linked.timestamp.isoformat() if m_linked else None,
+                "content": d_text[:300]
+            })
+
         # Semantic vector matches
         semantic_matches = LocalEmbeddingEngine.search_semantic(query, db, limit=5, conversation_id=conversation_id)
         semantic_ids = [m["message_id"] for m in semantic_matches]
@@ -152,7 +201,7 @@ class AskWhatsAppEngine:
         candidate_map = {m.id: m for m in (fts_messages + semantic_messages)}
         retrieved_messages = list(candidate_map.values())[:8]
 
-        if not retrieved_messages:
+        if not retrieved_messages and not derived_citations:
             return {
                 "answer": "لم يتم العثور على معلومات مطابقة في قاعدة البيانات المحلية لهذه المحادثة.",
                 "citations": []
@@ -163,6 +212,7 @@ class AskWhatsAppEngine:
         for m in retrieved_messages:
             lines.append(f"• **{m.sender_name}** ({m.timestamp.strftime('%Y-%m-%d %H:%M')}): {m.content}")
             citations.append({
+                "source_origin": "source_message",
                 "source_type": "message",
                 "message_id": m.id,
                 "conversation_id": m.conversation_id,
@@ -172,12 +222,19 @@ class AskWhatsAppEngine:
                 "message_type": m.message_type
             })
 
+        for dc in derived_citations:
+            lines.append(f"• **[مرفق: {dc['file_name']} ({dc['source_type']})]** ({dc['sender']}): {dc['content']}")
+            citations.append(dc)
+
         if GeminiService.is_configured():
             try:
-                evidence_context = "\n".join([
+                evidence_items = [
                     f"[{m.sender_name} في {m.timestamp.strftime('%Y-%m-%d %H:%M')}]: {m.content}"
                     for m in retrieved_messages
-                ])
+                ]
+                for dc in derived_citations:
+                    evidence_items.append(f"[مرفق {dc['file_name']} ({dc['source_type']}) من {dc['sender']}]: {dc['content']}")
+                evidence_context = "\n".join(evidence_items)
                 prompt = (
                     f"أنت مساعد ذكي لتطبيق Omar WhatsApp Intelligence (OWI).\n"
                     f"أجب عن سؤال المستخدم بدقة وبناءً فقط على الأدلة المقتبسة التالية من محادثات الواتساب:\n\n"

@@ -6,12 +6,15 @@ Intelligence API routes:
 - Executive Briefings generator
 """
 
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from pydantic import BaseModel
 from sqlalchemy import text, or_
 from sqlalchemy.orm import Session
+
+from owi.core.logging import logger
 
 from owi.db.database import get_db
 from owi.db.models import (
@@ -46,7 +49,7 @@ def search(
     results = []
     seen_ids = set()
 
-    # 1. Full-text search with FTS5
+    # 1. Full-text search with FTS5 over messages
     if mode in ("fts", "hybrid"):
         try:
             tokens = [t for t in q.split() if len(t) > 1]
@@ -68,6 +71,8 @@ def search(
                     for m in query_obj.all():
                         seen_ids.add(m.id)
                         results.append({
+                            "source_origin": "source_message",
+                            "source_type": "message",
                             "message_id": m.id,
                             "conversation_id": m.conversation_id,
                             "sender_name": m.sender_name,
@@ -85,6 +90,8 @@ def search(
                 if m.id not in seen_ids:
                     seen_ids.add(m.id)
                     results.append({
+                        "source_origin": "source_message",
+                        "source_type": "message",
                         "message_id": m.id,
                         "conversation_id": m.conversation_id,
                         "sender_name": m.sender_name,
@@ -94,12 +101,60 @@ def search(
                         "match_mode": "keyword"
                     })
 
-    # 2. Semantic vector search
+    # 2. Search verified derived text (transcripts, OCR, documents)
+    if mode in ("fts", "hybrid"):
+        derived_rows = []
+        try:
+            tokens = [t for t in re.findall(r"\w+", q) if len(t) > 1]
+            if tokens:
+                fts_query = " OR ".join(f'"{t}"' for t in tokens)
+                sql_derived = text("""
+                    SELECT media_asset_id, message_id, conversation_id, file_name, source_type, content
+                    FROM derived_fts
+                    WHERE derived_fts MATCH :query
+                    LIMIT :limit;
+                """)
+                derived_rows = db.execute(sql_derived, {"query": fts_query, "limit": limit}).fetchall()
+        except Exception as e:
+            logger.warning(f"derived_fts search query notice: {e}")
+
+        if not derived_rows and q.strip():
+            try:
+                sql_like = text("""
+                    SELECT media_asset_id, message_id, conversation_id, file_name, source_type, content
+                    FROM derived_fts
+                    WHERE content LIKE :like_term
+                    LIMIT :limit;
+                """)
+                derived_rows = db.execute(sql_like, {"like_term": f"%{q.strip()}%", "limit": limit}).fetchall()
+            except Exception as e:
+                logger.warning(f"derived_fts LIKE fallback notice: {e}")
+
+        for aid, mid, cid, fname, stype, d_content in derived_rows:
+            if conversation_id and cid != conversation_id:
+                continue
+            m_linked = db.query(Message).filter(Message.id == mid).first() if mid else None
+            results.append({
+                "source_origin": "derived",
+                "source_type": stype,
+                "media_asset_id": aid,
+                "message_id": mid,
+                "conversation_id": cid,
+                "file_name": fname,
+                "sender_name": m_linked.sender_name if m_linked else "Attachment",
+                "timestamp": m_linked.timestamp.isoformat() if m_linked else None,
+                "content": d_content,
+                "match_mode": "derived_full_text"
+            })
+
+    # 3. Semantic vector search
     if mode in ("semantic", "hybrid") and len(results) < limit:
         semantic_matches = LocalEmbeddingEngine.search_semantic(q, db, limit=limit, conversation_id=conversation_id)
         for sm in semantic_matches:
             if sm["message_id"] not in seen_ids:
                 seen_ids.add(sm["message_id"])
+                sm["source_origin"] = "source_message"
+                sm["source_type"] = "message"
                 sm["match_mode"] = "semantic"
                 results.append(sm)
 

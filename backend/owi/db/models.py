@@ -109,6 +109,11 @@ class MediaAsset(Base):
     duration_seconds = Column(Float, nullable=True)
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
+    processing_status = Column(String(50), default="unprocessed", index=True)  # unprocessed, queued, processing, completed, failed, unsupported, setup_needed
+    processing_error = Column(String(255), nullable=True)
+    processing_attempts = Column(Integer, default=0)
+    processing_method = Column(String(100), nullable=True)
+    processed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

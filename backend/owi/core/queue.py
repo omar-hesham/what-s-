@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Any, Optional
 from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
 from owi.db.database import SessionLocal
 from owi.db.models import Job
 from owi.core.logging import logger
@@ -25,9 +26,12 @@ class JobQueue:
         self.handlers[job_type] = handler
         logger.info(f"Registered job handler for '{job_type}'")
 
-    def enqueue(self, job_type: str, payload: Optional[Dict[str, Any]] = None) -> int:
+    def enqueue(self, job_type: str, payload: Optional[Dict[str, Any]] = None, db: Optional[Session] = None) -> int:
         """Enqueue a new job and schedule it for execution."""
-        db = SessionLocal()
+        close_db = False
+        if db is None:
+            db = SessionLocal()
+            close_db = True
         try:
             job = Job(
                 job_type=job_type,
@@ -43,7 +47,8 @@ class JobQueue:
             db.refresh(job)
             job_id = job.id
         finally:
-            db.close()
+            if close_db:
+                db.close()
 
         # Submit to thread pool
         self.executor.submit(self._run_job, job_id, job_type, payload or {})
@@ -183,3 +188,138 @@ class JobQueue:
 # Global job queue singleton
 job_queue = JobQueue(max_workers=2)
 
+def handle_media_processing(job_id: int, payload: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
+    """Unified background handler that dispatches media assets to the appropriate local pipeline."""
+    media_asset_id = payload.get("media_asset_id")
+    if not media_asset_id:
+        raise ValueError("Payload missing 'media_asset_id'")
+
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    try:
+        from owi.db.models import MediaAsset
+        asset = db.query(MediaAsset).filter(MediaAsset.id == media_asset_id).first()
+        if not asset:
+            raise ValueError(f"MediaAsset #{media_asset_id} not found")
+
+        f_type = (asset.file_type or "").lower()
+        if f_type in ("audio", "voice"):
+            from owi.pipeline.audio import AudioTranscriber
+            return AudioTranscriber.transcribe(media_asset_id, db)
+        elif f_type in ("image", "photo"):
+            from owi.pipeline.ocr import ImageAnalyzer
+            return ImageAnalyzer.analyze_image(media_asset_id, db)
+        elif f_type in ("document", "doc"):
+            from owi.pipeline.document import DocumentProcessor
+            return DocumentProcessor.process_document(media_asset_id, db)
+        elif f_type in ("video",):
+            from owi.pipeline.video import VideoProcessor
+            return VideoProcessor.process_video(media_asset_id, db)
+        else:
+            asset.processing_status = "unsupported"
+            asset.processing_error = f"unsupported_media_type ({f_type})"
+            asset.processed_at = datetime.utcnow()
+            db.commit()
+            return {"status": "unsupported", "error": f"Unsupported media type: {f_type}"}
+    finally:
+        if close_db:
+            db.close()
+
+def handle_transcription(job_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    media_asset_id = payload.get("media_asset_id")
+    db = SessionLocal()
+    try:
+        from owi.pipeline.audio import AudioTranscriber
+        return AudioTranscriber.transcribe(media_asset_id, db)
+    finally:
+        db.close()
+
+def handle_ocr(job_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    media_asset_id = payload.get("media_asset_id")
+    db = SessionLocal()
+    try:
+        from owi.pipeline.ocr import ImageAnalyzer
+        return ImageAnalyzer.analyze_image(media_asset_id, db)
+    finally:
+        db.close()
+
+def handle_document(job_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    media_asset_id = payload.get("media_asset_id")
+    db = SessionLocal()
+    try:
+        from owi.pipeline.document import DocumentProcessor
+        return DocumentProcessor.process_document(media_asset_id, db)
+    finally:
+        db.close()
+
+def handle_video(job_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    media_asset_id = payload.get("media_asset_id")
+    db = SessionLocal()
+    try:
+        from owi.pipeline.video import VideoProcessor
+        return VideoProcessor.process_video(media_asset_id, db)
+    finally:
+        db.close()
+
+# Register core handlers
+job_queue.register_handler("media_processing", handle_media_processing)
+job_queue.register_handler("transcription", handle_transcription)
+job_queue.register_handler("ocr", handle_ocr)
+job_queue.register_handler("document", handle_document)
+job_queue.register_handler("video", handle_video)
+
+def enqueue_media_processing(
+    media_asset_id: int,
+    force_retry: bool = False,
+    db: Optional[Session] = None
+) -> Optional[int]:
+    """
+    Enqueue background processing for a MediaAsset idempotently.
+    - If already queued or processing: returns active job_id without creating duplicate jobs.
+    - If completed and not force_retry: returns None without duplicate processing.
+    - If failed, setup_needed, unprocessed, or force_retry: resets state to queued and enqueues job.
+    """
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    try:
+        from owi.db.models import MediaAsset, Job
+        asset = db.query(MediaAsset).filter(MediaAsset.id == media_asset_id).first()
+        if not asset:
+            logger.warning(f"enqueue_media_processing: MediaAsset #{media_asset_id} not found.")
+            return None
+
+        current_status = (asset.processing_status or "unprocessed").lower()
+
+        # Check for active existing job in queue
+        active_jobs = db.query(Job).filter(
+            Job.job_type == "media_processing",
+            Job.status.in_(["queued", "processing"])
+        ).all()
+        for j in active_jobs:
+            if isinstance(j.payload, dict) and j.payload.get("media_asset_id") == media_asset_id:
+                logger.info(f"MediaAsset #{media_asset_id} already has active job #{j.id} ({j.status}). Reusing job.")
+                return j.id
+
+        # If already completed and no explicit retry requested: skip
+        if current_status == "completed" and not force_retry:
+            logger.info(f"MediaAsset #{media_asset_id} is already completed. Skipping duplicate processing.")
+            return None
+
+        # If already marked queued or processing and no active job was found:
+        if current_status in ("queued", "processing") and not force_retry:
+            return None
+
+        # Update asset status to queued
+        asset.processing_status = "queued"
+        asset.processing_error = None
+        db.commit()
+
+        job_id = job_queue.enqueue("media_processing", {"media_asset_id": media_asset_id}, db=db)
+        return job_id
+    finally:
+        if close_db:
+            db.close()

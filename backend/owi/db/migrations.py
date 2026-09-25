@@ -2,6 +2,7 @@
 Database schema migrations and FTS5 table initialization.
 """
 
+from typing import Optional
 from sqlalchemy import text
 from owi.db.database import engine, Base
 from owi.core.logging import logger
@@ -60,8 +61,24 @@ def init_db():
             if existing_att_cols and "attachment_position" not in existing_att_cols:
                 conn.execute(text("ALTER TABLE attachment_records ADD COLUMN attachment_position INTEGER;"))
                 conn.commit()
+
+            # Ensure media_assets has durable processing state columns
+            res_ma = conn.execute(text("PRAGMA table_info(media_assets);"))
+            existing_ma_cols = {row[1] for row in res_ma.fetchall()}
+            if existing_ma_cols:
+                if "processing_status" not in existing_ma_cols:
+                    conn.execute(text("ALTER TABLE media_assets ADD COLUMN processing_status VARCHAR(50) DEFAULT 'unprocessed';"))
+                if "processing_error" not in existing_ma_cols:
+                    conn.execute(text("ALTER TABLE media_assets ADD COLUMN processing_error VARCHAR(255);"))
+                if "processing_attempts" not in existing_ma_cols:
+                    conn.execute(text("ALTER TABLE media_assets ADD COLUMN processing_attempts INTEGER DEFAULT 0;"))
+                if "processing_method" not in existing_ma_cols:
+                    conn.execute(text("ALTER TABLE media_assets ADD COLUMN processing_method VARCHAR(100);"))
+                if "processed_at" not in existing_ma_cols:
+                    conn.execute(text("ALTER TABLE media_assets ADD COLUMN processed_at DATETIME;"))
+                conn.commit()
         except Exception as e:
-            logger.warning(f"attachment_records table notice: {e}")
+            logger.warning(f"Schema migration columns notice: {e}")
 
         try:
             conn.execute(text("""
@@ -72,8 +89,19 @@ def init_db():
                     tokenize='unicode61 remove_diacritics 2'
                 );
             """))
+            conn.execute(text("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS derived_fts USING fts5(
+                    media_asset_id UNINDEXED,
+                    message_id UNINDEXED,
+                    conversation_id UNINDEXED,
+                    file_name UNINDEXED,
+                    source_type,
+                    content,
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+            """))
             conn.commit()
-            logger.info("FTS5 full-text search index verified.")
+            logger.info("FTS5 full-text search indexes (messages_fts, derived_fts) verified.")
         except Exception as e:
             logger.warning(f"FTS5 initialization notice: {e}")
 
@@ -89,3 +117,45 @@ def sync_message_fts(conn, message_id: int, content: str, sender_name: str):
         """), {"mid": message_id, "content": content, "sender": sender_name})
     except Exception as e:
         logger.warning(f"Failed to sync message {message_id} to FTS: {e}")
+
+def sync_derived_fts(
+    conn,
+    media_asset_id: int,
+    message_id: Optional[int],
+    conversation_id: Optional[int],
+    file_name: str,
+    source_type: str,
+    content: str
+):
+    """
+    Insert or replace verified derived text (transcript, ocr, document) into derived_fts index.
+    Does NOT index empty strings or whitespace.
+    """
+    clean_content = (content or "").strip()
+    try:
+        conn.execute(text("""
+            DELETE FROM derived_fts WHERE media_asset_id = :aid;
+        """), {"aid": media_asset_id})
+        if clean_content:
+            conn.execute(text("""
+                INSERT INTO derived_fts(media_asset_id, message_id, conversation_id, file_name, source_type, content)
+                VALUES(:aid, :mid, :cid, :fname, :stype, :content);
+            """), {
+                "aid": media_asset_id,
+                "mid": message_id,
+                "cid": conversation_id,
+                "fname": file_name,
+                "stype": source_type,
+                "content": clean_content
+            })
+    except Exception as e:
+        logger.warning(f"Failed to sync derived text for asset {media_asset_id} to FTS: {e}")
+
+def remove_derived_fts(conn, media_asset_id: int):
+    """Remove derived text from FTS index."""
+    try:
+        conn.execute(text("""
+            DELETE FROM derived_fts WHERE media_asset_id = :aid;
+        """), {"aid": media_asset_id})
+    except Exception as e:
+        logger.warning(f"Failed to remove derived text for asset {media_asset_id} from FTS: {e}")

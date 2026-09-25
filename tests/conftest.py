@@ -67,6 +67,17 @@ def test_db(monkeypatch, tmp_path):
                     tokenize='unicode61 remove_diacritics 2'
                 );
             """))
+            conn.execute(text("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS derived_fts USING fts5(
+                    media_asset_id UNINDEXED,
+                    message_id UNINDEXED,
+                    conversation_id UNINDEXED,
+                    file_name UNINDEXED,
+                    source_type,
+                    content,
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+            """))
             conn.commit()
         except Exception:
             pass

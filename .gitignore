@@ -33,7 +33,15 @@ data/logs/*
 !data/logs/.gitkeep
 data/models/*
 !data/models/.gitkeep
+data/qa/
+data/tmp/
+
+# Scratch & Review Artifacts
+*.patch
+agy-*.txt
+qa_*.py
 
 # Environment & secrets
 .env
 .env.local
+

@@ -2169,10 +2169,19 @@ test("BulkEngine: Context menu Download automation acquires genuine download for
     querySelectorAll: () => []
   };
 
+  const mockMenuContainer = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "role" ? "menu" : null),
+    querySelectorAll: (sel) => {
+      if (sel.includes("menuitem") || sel.includes("Download") || sel.includes("button")) return [mockDownloadMenuItem];
+      return [];
+    }
+  };
+
   const mockDoc = {
     querySelectorAll: (sel) => {
-      if (contextMenuDispatched && (sel.includes("role='menu'") || sel.includes("button[role='menuitem']") || sel.includes("role='button'"))) {
-        return [mockDownloadMenuItem];
+      if (contextMenuDispatched && (sel.includes("role='menu'") || sel.includes("[role='menu']"))) {
+        return [mockMenuContainer];
       }
       return [];
     }
@@ -2326,3 +2335,677 @@ test("BackgroundBridge: Download capture arming state machine coordinates single
   assert.equal(successRes.downloadPath, "E:\\Users\\DELL\\Downloads\\PTT-real.ogg");
   assert.equal(successRes.fileSize, 88633);
 });
+
+// --- Real-Structure Acceptance Tests (2026-09-26 Live DOM Evidence) ---
+
+test("BulkEngine: Ancestor copyable-text carries data-pre-plain-text while selectable-text child lacks it", () => {
+  // Real DOM structure from 2026-09-26:
+  // <div data-id="false_msg_text_1" data-testid="conv-msg-false_msg_text_1">
+  //   <div class="copyable-text" data-pre-plain-text="[9:49 am, 22/09/2026] Omar: ">
+  //     <span class="selectable-text">Please review the project specs</span>
+  //   </div>
+  // </div>
+  let mockCopyableDiv;
+  const mockSelectableSpan = {
+    tagName: "SPAN",
+    classList: { contains: (c) => c === "selectable-text" },
+    innerText: "Please review the project specs",
+    textContent: "Please review the project specs",
+    getAttribute: () => null, // lacks data-pre-plain-text
+    closest: (sel) => (sel.includes("data-pre-plain-text") ? mockCopyableDiv : null)
+  };
+
+  mockCopyableDiv = {
+    tagName: "DIV",
+    classList: { contains: (c) => c === "copyable-text" },
+    getAttribute: (attr) => (attr === "data-pre-plain-text" ? "[9:49 am, 22/09/2026] Omar: " : null),
+    innerText: "Please review the project specs",
+    textContent: "Please review the project specs",
+    querySelector: (sel) => (sel.includes("selectable-text") ? mockSelectableSpan : null),
+    closest: () => null
+  };
+
+  const mockMsgNode = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_text_1" : (attr === "data-testid" ? "conv-msg-false_msg_text_1" : null)),
+    classList: { contains: (c) => c === "message-in" },
+    querySelector: (sel) => {
+      if (sel.includes("selectable-text")) return mockSelectableSpan;
+      if (sel.includes("copyable-text")) return mockCopyableDiv;
+      if (sel.includes("data-pre-plain-text")) return mockCopyableDiv;
+      return null;
+    },
+    querySelectorAll: () => []
+  };
+
+  const parsed = BulkEngine.parseMessageNode(mockMsgNode, "Omar", "DD/MM/YYYY");
+  assert.ok(parsed);
+  assert.equal(parsed.sender, "Omar");
+  assert.equal(parsed.text, "Please review the project specs");
+  assert.equal(parsed.timestamp, "2026-09-22T09:49:00");
+  assert.equal(parsed.timestamp_provenance, "verified");
+});
+
+test("BulkEngine: Nested media date backward - voice message in row wrapper resolves from preceding dated row in adjacent wrapper", () => {
+  // DOM structure:
+  // <div class="sender-group">
+  //   <div class="row-wrapper-1" role="row">
+  //     <div data-id="false_msg_txt_wed">
+  //       <div data-pre-plain-text="[6:35 pm, 23/09/2026] Omar: ">
+  //         <span class="selectable-text">Voice note coming next</span>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   <div class="row-wrapper-2" role="row">
+  //     <div data-id="false_msg_voice_wed">
+  //       <div data-testid="msg-meta"><span>6:35 pm</span></div>
+  //       <button aria-label="Play voice message"><span data-icon="ptt-status"></span></button>
+  //     </div>
+  //   </div>
+  // </div>
+  const mockRowWrapper1 = {
+    previousElementSibling: null,
+    nextElementSibling: null,
+    getAttribute: (attr) => (attr === "role" ? "row" : null),
+    querySelector: (sel) => (sel.includes("data-pre-plain-text") ? { getAttribute: () => "[6:35 pm, 23/09/2026] Omar: " } : null),
+    querySelectorAll: () => []
+  };
+
+  const mockVoicePlayBtn = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => (attr === "aria-label" ? "Play voice message" : null),
+    parentElement: null,
+    querySelectorAll: () => []
+  };
+
+  const mockVoiceMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_voice_wed" : null),
+    classList: { contains: () => false },
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return null;
+      if (sel.includes("msg-meta")) return { innerText: "6:35 pm", textContent: "6:35 pm" };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("voice message") || sel.includes("ptt-status")) return [mockVoicePlayBtn];
+      return [];
+    }
+  };
+
+  const mockRowWrapper2 = {
+    previousElementSibling: mockRowWrapper1,
+    nextElementSibling: null,
+    getAttribute: (attr) => (attr === "role" ? "row" : null),
+    querySelector: () => null,
+    querySelectorAll: () => []
+  };
+  mockRowWrapper1.nextElementSibling = mockRowWrapper2;
+  mockVoiceMsg.parentElement = mockRowWrapper2;
+
+  const parsed = BulkEngine.parseMessageNode(mockVoiceMsg, "Omar", "DD/MM/YYYY");
+  assert.ok(parsed);
+  assert.equal(parsed.timestamp, "2026-09-23T18:35:00");
+  assert.equal(parsed.timestamp_provenance, "derived_neighbor");
+  assert.equal(parsed.has_media, true);
+});
+
+test("BulkEngine: Nested media date forward - document card in row wrapper resolves from following dated row in adjacent wrapper", () => {
+  // DOM structure:
+  // <div class="sender-group">
+  //   <div class="row-wrapper-1" role="row">
+  //     <div data-id="false_msg_doc_tue">
+  //       <div data-testid="msg-meta"><span>9:49 am</span></div>
+  //       <div role="button" data-testid="document-thumb" title='Download "sample.docx"'></div>
+  //     </div>
+  //   </div>
+  //   <div class="row-wrapper-2" role="row">
+  //     <div data-id="false_msg_txt_tue">
+  //       <div data-pre-plain-text="[9:49 am, 22/09/2026] Omar: ">
+  //         <span class="selectable-text">Attached document above</span>
+  //       </div>
+  //     </div>
+  //   </div>
+  // </div>
+  const mockDocThumb = {
+    tagName: "DIV",
+    getAttribute: (attr) => {
+      if (attr === "data-testid") return "document-thumb";
+      if (attr === "title") return 'Download "sample.docx"';
+      if (attr === "role") return "button";
+      return null;
+    },
+    innerText: "sample.docx",
+    textContent: "sample.docx",
+    querySelectorAll: () => []
+  };
+
+  const mockDocMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "false_msg_doc_tue" : null),
+    classList: { contains: () => false },
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return null;
+      if (sel.includes("msg-meta")) return { innerText: "9:49 am", textContent: "9:49 am" };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) return [mockDocThumb];
+      return [];
+    }
+  };
+
+  const mockRowWrapper2 = {
+    previousElementSibling: null,
+    nextElementSibling: null,
+    getAttribute: (attr) => (attr === "role" ? "row" : null),
+    querySelector: (sel) => (sel.includes("data-pre-plain-text") ? { getAttribute: () => "[9:49 am, 22/09/2026] Omar: " } : null),
+    querySelectorAll: () => []
+  };
+
+  const mockRowWrapper1 = {
+    previousElementSibling: null,
+    nextElementSibling: mockRowWrapper2,
+    getAttribute: (attr) => (attr === "role" ? "row" : null),
+    querySelector: () => null,
+    querySelectorAll: () => []
+  };
+  mockRowWrapper2.previousElementSibling = mockRowWrapper1;
+  mockDocMsg.parentElement = mockRowWrapper1;
+
+  const parsed = BulkEngine.parseMessageNode(mockDocMsg, "Omar", "DD/MM/YYYY");
+  assert.ok(parsed);
+  assert.equal(parsed.timestamp, "2026-09-22T09:49:00");
+  assert.equal(parsed.timestamp_provenance, "derived_neighbor");
+  assert.equal(parsed.has_media, true);
+  assert.equal(parsed.media_type, "document");
+  assert.equal(parsed.media_filename, "sample.docx");
+});
+
+test("BulkEngine: Weekday date separator with absolute anchor resolves date, standalone remains null, and never crosses different day", () => {
+  // Test A: Plain div date separator "Tuesday" anchored by adjacent dated message 22/09/2026
+  const mockContainer = {
+    querySelectorAll: () => []
+  };
+
+  const mockTuesdaySep = {
+    tagName: "DIV",
+    innerText: "Tuesday",
+    textContent: "Tuesday",
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: mockContainer,
+    getAttribute: () => null,
+    querySelector: () => null
+  };
+
+  const mockAnchorMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-pre-plain-text" ? "[10:00 am, 22/09/2026] Omar: " : null),
+    previousElementSibling: mockTuesdaySep,
+    nextElementSibling: null,
+    parentElement: mockContainer,
+    querySelector: () => null
+  };
+  mockTuesdaySep.nextElementSibling = mockAnchorMsg;
+
+  const mockVoiceInTuesday = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "voice_tue" : null),
+    previousElementSibling: mockAnchorMsg,
+    nextElementSibling: null,
+    parentElement: mockContainer,
+    querySelector: (sel) => (sel.includes("msg-meta") ? { innerText: "10:15 am", textContent: "10:15 am" } : null),
+    querySelectorAll: () => []
+  };
+  mockAnchorMsg.nextElementSibling = mockVoiceInTuesday;
+
+  const resolvedDate = BulkEngine.findDefensibleDateForElement(mockVoiceInTuesday, mockContainer);
+  assert.equal(resolvedDate, "22/09/2026", "Tuesday anchored by adjacent 22/09/2026 must resolve to 22/09/2026");
+
+  // Test B: Standalone weekday separator "Thursday" without ANY absolute anchor in container remains null
+  const emptyContainer = { querySelectorAll: () => [] };
+  const mockThursdaySep = {
+    tagName: "DIV",
+    innerText: "Thursday",
+    textContent: "Thursday",
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: emptyContainer,
+    getAttribute: () => null,
+    querySelector: () => null
+  };
+  const mockVoiceStandalone = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "voice_thurs" : null),
+    previousElementSibling: mockThursdaySep,
+    nextElementSibling: null,
+    parentElement: emptyContainer,
+    querySelector: (sel) => (sel.includes("msg-meta") ? { innerText: "10:15 am" } : null),
+    querySelectorAll: () => []
+  };
+  mockThursdaySep.nextElementSibling = mockVoiceStandalone;
+
+  const standaloneRes = BulkEngine.findDefensibleDateForElement(mockVoiceStandalone, emptyContainer);
+  assert.equal(standaloneRes, null, "Standalone weekday without absolute anchor must remain unresolved (null)");
+
+  // Test C: Forward search from Tuesday message must STOP at Wednesday separator and NOT cross into Wednesday
+  const mockWednesdaySep = {
+    tagName: "DIV",
+    innerText: "Wednesday",
+    textContent: "Wednesday",
+    previousElementSibling: null,
+    nextElementSibling: null,
+    parentElement: mockContainer,
+    getAttribute: () => null,
+    querySelector: () => null
+  };
+  const mockWedMsg = {
+    getAttribute: (attr) => (attr === "data-pre-plain-text" ? "[2:00 pm, 23/09/2026] Omar: " : null)
+  };
+  mockWednesdaySep.nextElementSibling = mockWedMsg;
+
+  const mockMsgTueBeforeWed = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "msg_tue_bound" : null),
+    previousElementSibling: null,
+    nextElementSibling: mockWednesdaySep,
+    parentElement: mockContainer,
+    querySelector: (sel) => (sel.includes("msg-meta") ? { innerText: "11:00 am" } : null),
+    querySelectorAll: () => []
+  };
+
+  const crossedDate = BulkEngine.findDefensibleDateForElement(mockMsgTueBeforeWed, mockContainer);
+  assert.notEqual(crossedDate, "23/09/2026", "Must not cross an explicit different day separator");
+});
+
+test("BulkEngine: Unrelated message date text inside chat prose is rejected as date separator", () => {
+  const mockProseSpan = {
+    tagName: "SPAN",
+    classList: { contains: (c) => c === "selectable-text" },
+    innerText: "Let's meet on 19/09/2026 at the office to review contracts",
+    textContent: "Let's meet on 19/09/2026 at the office to review contracts",
+    getAttribute: () => null,
+    closest: () => null
+  };
+
+  const mockProseMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "prose_msg" : null),
+    querySelector: (sel) => {
+      if (sel.includes("selectable-text")) return mockProseSpan;
+      if (sel.includes("msg-meta")) return { innerText: "4:00 pm", textContent: "4:00 pm" };
+      return null;
+    },
+    querySelectorAll: () => []
+  };
+
+  const mockFollowerMedia = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "media_after_prose" : null),
+    previousElementSibling: mockProseMsg,
+    nextElementSibling: null,
+    parentElement: null,
+    querySelector: (sel) => (sel.includes("msg-meta") ? { innerText: "4:05 pm", textContent: "4:05 pm" } : null),
+    querySelectorAll: () => []
+  };
+  mockProseMsg.nextElementSibling = mockFollowerMedia;
+
+  const derived = BulkEngine.findDefensibleDateForElement(mockFollowerMedia, null);
+  assert.equal(derived, null, "Must NOT parse arbitrary message prose as a date separator");
+});
+
+test("BulkEngine: Duplicate selector canonicalization avoids nested .message-in duplicate entries", async () => {
+  let outerMsg;
+  const innerBubble = {
+    tagName: "DIV",
+    classList: { contains: (c) => c === "message-in" },
+    getAttribute: () => null,
+    parentElement: null,
+    closest: (sel) => (sel.includes("data-id") ? outerMsg : null),
+    querySelector: (sel) => (sel.includes("data-pre-plain-text") ? { getAttribute: () => "[10:00 am, 22/09/2026] Omar: " } : null),
+    querySelectorAll: () => []
+  };
+
+  outerMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "true_msg_dup_1" : null),
+    classList: { contains: () => false },
+    closest: (sel) => (sel.includes("data-id") ? outerMsg : null),
+    querySelector: (sel) => (sel.includes("data-pre-plain-text") ? { getAttribute: () => "[10:00 am, 22/09/2026] Omar: " } : null),
+    querySelectorAll: () => []
+  };
+  innerBubble.parentElement = outerMsg;
+
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 200,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelectorAll: () => [outerMsg, innerBubble]
+  };
+
+  const messageMap = new Map();
+  const newlyFound = await BulkEngine.scanCurrentDOMMessages(mockContainer, "Omar", "DD/MM/YYYY", messageMap);
+
+  assert.equal(newlyFound, 1, "Must canonicalize to single platform message, ignoring inner duplicate");
+  assert.equal(messageMap.size, 1);
+  assert.ok(messageMap.has("true_msg_dup_1"));
+});
+
+test("BulkEngine: Skeleton message does not permanently occupy messageMap and updates upon hydration", async () => {
+  let isHydrated = false;
+
+  const dynamicMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "true_msg_skel_1" : null),
+    classList: { contains: () => false },
+    closest: () => null,
+    querySelector: (sel) => {
+      if (!isHydrated) return null; // Skeleton: no pre-plain, no meta, no text
+      if (sel.includes("data-pre-plain-text")) return { getAttribute: () => "[11:00 am, 22/09/2026] Omar: " };
+      if (sel.includes("selectable-text")) return { innerText: "Hydrated message body", textContent: "Hydrated message body" };
+      return null;
+    },
+    querySelectorAll: () => []
+  };
+
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 200,
+    querySelectorAll: () => [dynamicMsg]
+  };
+
+  const messageMap = new Map();
+
+  // Scan 1: Node is skeleton
+  await BulkEngine.scanCurrentDOMMessages(mockContainer, "Omar", "DD/MM/YYYY", messageMap);
+  assert.equal(messageMap.size, 1);
+  const skelItem = messageMap.get("true_msg_skel_1");
+  assert.equal(skelItem.is_skeleton, true);
+  assert.equal(skelItem.parsed_date, null);
+
+  // Hydration event occurs (scrolled into view)
+  isHydrated = true;
+
+  // Scan 2: Re-scanning must update the skeleton with full hydrated message!
+  const newlyFound = await BulkEngine.scanCurrentDOMMessages(mockContainer, "Omar", "DD/MM/YYYY", messageMap);
+  assert.equal(newlyFound, 1, "Hydration must be counted as newly resolved item");
+  assert.equal(messageMap.size, 1, "Must update existing key without ballooning map");
+
+  const hydratedItem = messageMap.get("true_msg_skel_1");
+  assert.equal(hydratedItem.is_skeleton, false);
+  assert.equal(hydratedItem.text, "Hydrated message body");
+  assert.equal(hydratedItem.timestamp, "2026-09-22T11:00:00");
+  assert.ok(hydratedItem.parsed_date);
+});
+
+test("BulkEngine: Date-range gate excludes out-of-range messages from media acquisition and stats", async () => {
+  let downloadTriggeredForOutRange = false;
+  let downloadTriggeredForInRange = false;
+
+  const mockBridgeSender = async (p) => {
+    if (p.action === "bridge_arm_download_capture") {
+      if (p.expectedFilename.includes("out_range")) downloadTriggeredForOutRange = true;
+      if (p.expectedFilename.includes("in_range")) downloadTriggeredForInRange = true;
+      return { success: true };
+    }
+    if (p.action === "bridge_await_download") {
+      return { success: true, downloadPath: "E:\\dl.ogg", fileSize: 1000 };
+    }
+    if (p.action === "bridge_disarm_download_capture") {
+      return { success: true };
+    }
+    return { success: true };
+  };
+
+  // Message 1: 14 Sep (BEFORE requested 19-24 Sep range)
+  const outRangeMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "msg_out_range" : null),
+    classList: { contains: () => false },
+    closest: () => null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return { getAttribute: () => "[10:00 am, 14/09/2026] Omar: " };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => {
+            if (attr === "data-testid") return "document-thumb";
+            if (attr === "title") return 'Download "out_range.pdf"';
+            return null;
+          },
+          innerText: "out_range.pdf",
+          click: () => {},
+          querySelectorAll: () => []
+        }];
+      }
+      return [];
+    }
+  };
+
+  // Message 2: 22 Sep (INSIDE requested 19-24 Sep range)
+  const inRangeMsg = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "data-id" ? "msg_in_range" : null),
+    classList: { contains: () => false },
+    closest: () => null,
+    querySelector: (sel) => {
+      if (sel.includes("data-pre-plain-text")) return { getAttribute: () => "[10:00 am, 22/09/2026] Omar: " };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes("document-thumb")) {
+        return [{
+          tagName: "DIV",
+          getAttribute: (attr) => {
+            if (attr === "data-testid") return "document-thumb";
+            if (attr === "title") return 'Download "in_range.pdf"';
+            return null;
+          },
+          innerText: "in_range.pdf",
+          click: () => {},
+          querySelectorAll: () => []
+        }];
+      }
+      return [];
+    }
+  };
+
+  const mockContainer = {
+    scrollTop: 0,
+    clientHeight: 200,
+    scrollHeight: 200,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200 }),
+    querySelectorAll: () => [outRangeMsg, inRangeMsg]
+  };
+
+  const res = await BulkEngine.runBulkCapture({
+    container: mockContainer,
+    doc: { querySelector: () => ({ innerText: "Omar", getAttribute: () => "Omar" }) },
+    mode: "date_range",
+    fromDate: "2026-09-19T00:00:00",
+    toDate: "2026-09-24T23:59:59",
+    captureMedia: true,
+    bridgeSender: mockBridgeSender,
+    maxScrollAttempts: 2,
+    scrollDelayMs: 2
+  });
+
+  assert.equal(downloadTriggeredForOutRange, false, "Must NOT acquire media for messages outside date range");
+  assert.equal(downloadTriggeredForInRange, true, "Must acquire media for in-range messages");
+  assert.equal(res.attachmentStats.totalDetected, 1, "Only in-range attachments counted");
+  assert.equal(res.attachmentStats.savedOriginal, 1);
+});
+
+test("BulkEngine: Context menu download scopes to newly opened menu and avoids double-toggle", async () => {
+  let downContextClicked = false;
+  let downloadClicked = false;
+
+  const mockDownloadBtn = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => (attr === "role" ? "menuitem" : (attr === "aria-label" ? "Download" : null)),
+    innerText: "Download",
+    click: () => { downloadClicked = true; }
+  };
+
+  const openedMenu = {
+    tagName: "DIV",
+    getAttribute: (attr) => (attr === "role" ? "menu" : null),
+    querySelectorAll: (sel) => (sel.includes("menuitem") || sel.includes("button") ? [mockDownloadBtn] : [])
+  };
+
+  let menuMounted = false;
+
+  const mockVoiceBtn = {
+    tagName: "BUTTON",
+    getAttribute: (attr) => (attr === "aria-label" ? "Play voice message" : null),
+    getBoundingClientRect: () => ({ left: 20, top: 20, width: 40, height: 40 }),
+    dispatchEvent: (evt) => {
+      if (evt && evt.type === "contextmenu") {
+        menuMounted = true;
+      }
+    },
+    closest: (sel) => {
+      if (sel.includes("data-id")) {
+        return {
+          querySelector: (s) => {
+            if (s.includes("down-context")) {
+              return {
+                click: () => { downContextClicked = true; }
+              };
+            }
+            return null;
+          }
+        };
+      }
+      return null;
+    }
+  };
+
+  const mockDoc = {
+    querySelectorAll: (sel) => {
+      if (menuMounted && sel.includes("role='menu'")) {
+        return [openedMenu];
+      }
+      return [];
+    }
+  };
+
+  const res = await BulkEngine.captureAttachmentOriginalBytes({
+    id: "att_scope_test",
+    file_type: "audio",
+    file_name: "test_voice.ogg",
+    mime_type: "audio/ogg",
+    blob_url: null,
+    download_el: null,
+    container_el: mockVoiceBtn,
+    can_context_download: true
+  }, {
+    doc: mockDoc,
+    timeoutMs: 1000,
+    bridgeSender: async (p) => {
+      if (p.action === "bridge_arm_download_capture") return { success: true };
+      if (p.action === "bridge_await_download") return { success: true, downloadPath: "E:\\dl.ogg", fileSize: 500 };
+      if (p.action === "bridge_disarm_download_capture") return { success: true };
+      return { success: true };
+    }
+  });
+
+  assert.equal(downloadClicked, true, "Download button inside menu must be clicked");
+  assert.equal(downContextClicked, false, "Must NEVER double-toggle with down-context when menu already opened");
+  assert.equal(res.status, "saved-original");
+});
+
+test("BulkEngine: Outgoing chunk retains attachment reason/error/stage and durable tracking prevents duplicate counts on retry", async () => {
+  // 1. Post chunk verifies reason, error, stage passed to bridge
+  let passedPayload = null;
+  const mockBridge = async (p) => {
+    passedPayload = p;
+    return { success: true, data: { messages_ingested: 1, duplicates_skipped: 0 } };
+  };
+
+  const testChunk = [{
+    sender: "Omar",
+    text: "Voice note message",
+    timestamp: "2026-09-22T10:00:00",
+    is_outgoing: false,
+    key: "msg_100",
+    has_media: true,
+    media_type: "voice",
+    media_filename: "voice_note_1.ogg",
+    attachment_status: "unavailable",
+    attachments: [{
+      file_name: "voice_note_1.ogg",
+      file_type: "audio",
+      mime_type: "audio/ogg",
+      file_size: 0,
+      attachment_position: 1,
+      attachment_status: "unavailable",
+      reason: "voice_note_no_dom_src",
+      error: null,
+      stage: "menu_discovery"
+    }]
+  }];
+
+  await BulkEngine.postChunkWithRetry({
+    chatTitle: "Omar",
+    chunk: testChunk,
+    chunkIndex: 0,
+    totalChunks: 1,
+    isLastChunk: true,
+    bridgeSender: mockBridge
+  });
+
+  assert.ok(passedPayload);
+  const attInPayload = passedPayload.chunk[0].attachments[0];
+  assert.equal(attInPayload.reason, "voice_note_no_dom_src");
+  assert.equal(attInPayload.stage, "menu_discovery");
+
+  // 2. Disarm on failure/cancel
+  let disarmed = false;
+  const mockDisarmBridge = async (p) => {
+    if (p.action === "bridge_arm_download_capture") return { success: true };
+    if (p.action === "bridge_disarm_download_capture") {
+      disarmed = true;
+      return { success: true };
+    }
+    return { success: true };
+  };
+
+  const attFailed = {
+    id: "att_fail_test",
+    file_type: "audio",
+    file_name: "failing.ogg",
+    mime_type: "audio/ogg",
+    blob_url: null,
+    download_el: null,
+    container_el: { querySelector: () => null, dispatchEvent: () => {} },
+    can_context_download: true
+  };
+
+  // When context download menu item is not found, bridge must be disarmed
+  const failRes = await BulkEngine.captureAttachmentOriginalBytes(attFailed, {
+    bridgeSender: mockDisarmBridge,
+    doc: { querySelectorAll: () => [] },
+    timeoutMs: 150
+  });
+
+  assert.equal(disarmed, true, "Bridge must be explicitly disarmed when download capture fails or menu not found");
+  assert.equal(failRes.status, "unavailable");
+  assert.ok(
+    failRes.reason === "download_menu_item_not_found" || failRes.reason === "voice_note_no_dom_src",
+    `Expected valid unavailable reason, got ${failRes.reason}`
+  );
+});
+

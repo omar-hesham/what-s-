@@ -2,11 +2,14 @@
 Conversations API routes: listing, uploading, analyzing, and deleting.
 """
 
+import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -20,6 +23,8 @@ from owi.templates.property_stone import PropertyStoneEngine
 from owi.templates.research import ResearchEngine
 from owi.core.hashing import compute_sha256
 from owi.core.logging import logger
+from owi.core.security import verify_session_or_token
+from owi.pipeline.report_service import ReportService, parse_filter_datetime
 
 router = APIRouter(prefix="/api/conversations", tags=["Conversations"])
 
@@ -242,3 +247,170 @@ def delete_conversation(conversation_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"status": "deleted", "conversation_id": conversation_id}
+
+
+@router.get("/{conversation_id}/inventory")
+def get_conversation_inventory(
+    conversation_id: int,
+    date_from: Optional[str] = Query(None, description="Filter start date (ISO string)"),
+    date_to: Optional[str] = Query(None, description="Filter end date (ISO string)"),
+    sender: Optional[str] = Query(None, description="Filter sender name"),
+    db: Session = Depends(get_db),
+    authenticated: bool = Depends(verify_session_or_token)
+):
+    """
+    Exhaustive deterministic evidence inventory for a conversation.
+    Inspects and physically verifies every attachment (files on disk, SHA256, previews, missing originals, placeholders).
+    """
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    try:
+        df = parse_filter_datetime(date_from)
+        dt = parse_filter_datetime(date_to)
+        if df and dt and df > dt:
+            raise HTTPException(status_code=400, detail="Invalid date range: 'date_from' must be earlier than or equal to 'date_to'.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Expected valid ISO 8601 string.")
+
+    try:
+        inventory = ReportService.build_inventory(
+            conversation_id=conversation_id,
+            db=db,
+            date_from=df,
+            date_to=dt,
+            sender=sender
+        )
+        return inventory
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error building inventory for conversation #{conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error generating evidence inventory.")
+
+
+@router.get("/{conversation_id}/report")
+def get_conversation_report(
+    conversation_id: int,
+    date_from: Optional[str] = Query(None, description="Filter start date (ISO string)"),
+    date_to: Optional[str] = Query(None, description="Filter end date (ISO string)"),
+    sender: Optional[str] = Query(None, description="Filter sender name"),
+    keywords: Optional[str] = Query(None, description="Comma-separated keywords or search terms for deterministic filtering"),
+    format: Optional[str] = Query("json", description="Output format: 'json' or 'markdown' / 'md'"),
+    db: Session = Depends(get_db),
+    authenticated: bool = Depends(verify_session_or_token)
+):
+    """
+    Deterministic evidence report with full citations, segment times, and machine-generated labels.
+    No model calls or AI inferences.
+    """
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    fmt = (format or "json").lower()
+    if fmt not in ("json", "markdown", "md"):
+        raise HTTPException(status_code=400, detail="Invalid format. Supported formats: 'json', 'markdown'.")
+
+    try:
+        df = parse_filter_datetime(date_from)
+        dt = parse_filter_datetime(date_to)
+        if df and dt and df > dt:
+            raise HTTPException(status_code=400, detail="Invalid date range: 'date_from' must be earlier than or equal to 'date_to'.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Expected valid ISO 8601 string.")
+
+    kw_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else None
+
+    try:
+        report = ReportService.build_report(
+            conversation_id=conversation_id,
+            db=db,
+            date_from=df,
+            date_to=dt,
+            sender=sender,
+            keywords=kw_list
+        )
+
+        if fmt in ("markdown", "md"):
+            return PlainTextResponse(content=report["markdown"], media_type="text/markdown; charset=utf-8")
+        return report
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error building report for conversation #{conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error generating evidence report.")
+
+
+@router.get("/{conversation_id}/export")
+def export_conversation_report(
+    conversation_id: int,
+    date_from: Optional[str] = Query(None, description="Filter start date (ISO string)"),
+    date_to: Optional[str] = Query(None, description="Filter end date (ISO string)"),
+    sender: Optional[str] = Query(None, description="Filter sender name"),
+    keywords: Optional[str] = Query(None, description="Comma-separated keywords for deterministic filtering"),
+    format: Optional[str] = Query("markdown", description="Export format: 'markdown' / 'md' or 'json'"),
+    db: Session = Depends(get_db),
+    authenticated: bool = Depends(verify_session_or_token)
+):
+    """
+    Authenticated safe export of evidence report.
+    No host filesystem paths or tokens in payload or headers.
+    """
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    fmt = (format or "markdown").lower()
+    if fmt not in ("markdown", "md", "json"):
+        raise HTTPException(status_code=400, detail="Invalid format. Supported formats: 'markdown', 'json'.")
+
+    try:
+        df = parse_filter_datetime(date_from)
+        dt = parse_filter_datetime(date_to)
+        if df and dt and df > dt:
+            raise HTTPException(status_code=400, detail="Invalid date range: 'date_from' must be earlier than or equal to 'date_to'.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Expected valid ISO 8601 string.")
+
+    kw_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else None
+
+    try:
+        report = ReportService.build_report(
+            conversation_id=conversation_id,
+            db=db,
+            date_from=df,
+            date_to=dt,
+            sender=sender,
+            keywords=kw_list
+        )
+
+        safe_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', conv.title[:30]).strip('_') or f"conv_{conversation_id}"
+
+        if fmt in ("json",):
+            content = json.dumps(report, indent=2, ensure_ascii=False)
+            filename = f"evidence_report_{conversation_id}_{safe_title}.json"
+            return Response(
+                content=content,
+                media_type="application/json; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+        else:
+            filename = f"evidence_report_{conversation_id}_{safe_title}.md"
+            return Response(
+                content=report["markdown"],
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error exporting report for conversation #{conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error exporting evidence report.")

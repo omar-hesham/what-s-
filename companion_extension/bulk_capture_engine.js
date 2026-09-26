@@ -299,19 +299,55 @@
    * Automate user-visible context-menu Download action on WhatsApp Web messages.
    * Right-clicking a voice message or document card opens the native message menu containing "Download" / "تنزيل".
    */
-  async function triggerContextMenuDownload(targetEl, { doc = (typeof document !== "undefined" ? document : null), timeoutMs = 2500 } = {}) {
+  async function triggerContextMenuDownload(targetEl, { doc = (typeof document !== "undefined" ? document : null), timeoutMs = 2500, checkCancelled = () => false } = {}) {
     if (!targetEl) return { success: false, reason: "no_target_element" };
 
+    const rootDoc = doc || (typeof document !== "undefined" ? document : null);
+    if (!rootDoc || typeof rootDoc.querySelectorAll !== "function") {
+      return { success: false, reason: "no_document_root" };
+    }
+
     try {
-      // 1. Dispatch contextmenu event on targetEl
+      // 0. Ensure targetEl or its interactive button is targeted
+      let actionEl = targetEl;
+      if (typeof targetEl.querySelector === "function") {
+        const playBtn = targetEl.querySelector(
+          "button[aria-label*='Play' i], button[aria-label*='voice message' i], button[aria-label*='تشغيل' i], span[data-icon='ptt-status']"
+        );
+        if (playBtn) actionEl = playBtn;
+      }
+
+      // Scroll into view if needed
+      if (typeof actionEl.scrollIntoView === "function") {
+        try { actionEl.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) {}
+      }
+
+      // Close preexisting menu before opening target if needed, no trust of old menu
+      const prevMenus = rootDoc.querySelectorAll("div[role='menu'], [role='menu']");
+      if (prevMenus && prevMenus.length > 0) {
+        if (typeof rootDoc.dispatchEvent === "function") {
+          try {
+            const escEvt = typeof KeyboardEvent !== "undefined"
+              ? new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })
+              : { type: "keydown", key: "Escape", bubbles: true };
+            rootDoc.dispatchEvent(escEvt);
+          } catch (e) {}
+        }
+      }
+      const existingMenus = new Set();
+      if (prevMenus) {
+        for (const m of prevMenus) existingMenus.add(m);
+      }
+
+      // 1. Dispatch contextmenu event on actionEl
       let clientX = 0, clientY = 0;
-      if (typeof targetEl.getBoundingClientRect === "function") {
-        const rect = targetEl.getBoundingClientRect();
+      if (typeof actionEl.getBoundingClientRect === "function") {
+        const rect = actionEl.getBoundingClientRect();
         clientX = Math.floor(rect.left + rect.width / 2);
         clientY = Math.floor(rect.top + rect.height / 2);
       }
 
-      if (typeof targetEl.dispatchEvent === "function") {
+      if (typeof actionEl.dispatchEvent === "function") {
         const cEvt = typeof MouseEvent !== "undefined"
           ? new MouseEvent("contextmenu", {
               bubbles: true,
@@ -331,38 +367,15 @@
               button: 2,
               buttons: 2
             };
-        targetEl.dispatchEvent(cEvt);
+        actionEl.dispatchEvent(cEvt);
       }
 
-      // Also check if message bubble has a context menu trigger button (e.g. [data-testid="down-context"], [aria-label="Menu"])
-      const msgParent = targetEl.closest ? targetEl.closest("div[data-id][data-testid^='conv-msg-'], div[data-id], .message-in, .message-out") : null;
-      if (msgParent && typeof msgParent.querySelector === "function") {
-        const menuBtn = msgParent.querySelector("[data-testid='down-context'], [data-icon='down-context'], button[aria-label*='Menu' i], button[aria-label*='قائمة' i]");
-        if (menuBtn && typeof menuBtn.click === "function") {
-          menuBtn.click();
-        }
-      }
-
-      // 2. Poll for menu items in document body
-      const rootDoc = doc || (typeof document !== "undefined" ? document : null);
-      if (!rootDoc || typeof rootDoc.querySelectorAll !== "function") {
-        return { success: false, reason: "no_document_root" };
-      }
-
-      const startTime = Date.now();
-      while (Date.now() - startTime < timeoutMs) {
-        await sleep(150);
-
-        const menuCandidates = rootDoc.querySelectorAll(
-          "div[role='menu'] button[role='menuitem'], div[role='menu'] [role='menuitem'], " +
-          "button[role='menuitem'], [role='menuitem'], " +
-          "div[role='menu'] div[role='button'], div[role='menu'] button, div[role='menu'] li, " +
-          "div[data-animate-dropdown-item='true'] button, div[data-animate-dropdown-item='true'] [role='menuitem'], " +
-          "div[role='application'] li, div[role='application'] div[role='button'], " +
-          "ul[class*='_'] li, [data-testid='mi-download'], li[role='button'], div[tabindex='-1']"
+      function findDownloadInMenu(menuEl) {
+        if (!menuEl || typeof menuEl.querySelectorAll !== "function") return null;
+        const candidates = menuEl.querySelectorAll(
+          "button[role='menuitem'], [role='menuitem'], div[role='button'], button, li[role='button'], div[tabindex='-1']"
         );
-
-        for (const item of menuCandidates) {
+        for (const item of candidates) {
           const text = (item.innerText || item.textContent || "").trim().toLowerCase();
           const testid = typeof item.getAttribute === "function" ? (item.getAttribute("data-testid") || "").toLowerCase() : "";
           const ariaLabel = typeof item.getAttribute === "function" ? (item.getAttribute("aria-label") || "").toLowerCase() : "";
@@ -379,16 +392,64 @@
             (role === "menuitem" && (ariaLabel.includes("download") || ariaLabel.includes("تنزيل") || text.includes("download") || text.includes("تنزيل")))
           );
 
-          if (isDownloadItem) {
-            if (typeof item.click === "function") {
-              item.click();
-            } else if (typeof item.dispatchEvent === "function") {
-              const clickEvt = typeof MouseEvent !== "undefined"
-                ? new MouseEvent("click", { bubbles: true, cancelable: true })
-                : { type: "click", bubbles: true, cancelable: true };
-              item.dispatchEvent(clickEvt);
+          if (isDownloadItem) return item;
+        }
+        return null;
+      }
+
+      function clickItem(item) {
+        if (typeof item.click === "function") {
+          item.click();
+        } else if (typeof item.dispatchEvent === "function") {
+          const clickEvt = typeof MouseEvent !== "undefined"
+            ? new MouseEvent("click", { bubbles: true, cancelable: true })
+            : { type: "click", bubbles: true, cancelable: true };
+          item.dispatchEvent(clickEvt);
+        }
+      }
+
+      // 2. Poll for newly opened menu items in document body
+      const startTime = Date.now();
+      let fallbackClicked = false;
+
+      while (Date.now() - startTime < timeoutMs) {
+        if (checkCancelled()) {
+          return { success: false, reason: "cancelled_by_user" };
+        }
+        await sleep(100);
+
+        // Prioritize only newly opened menu element (never trust preexisting menus)
+        let targetMenu = null;
+        const menuContainers = rootDoc.querySelectorAll("div[role='menu'], [role='menu']");
+        if (menuContainers) {
+          for (const m of menuContainers) {
+            if (!existingMenus.has(m)) {
+              targetMenu = m;
+              break;
             }
+          }
+        }
+
+        if (targetMenu) {
+          const dlBtn = findDownloadInMenu(targetMenu);
+          if (dlBtn) {
+            clickItem(dlBtn);
             return { success: true };
+          }
+        }
+
+        // Controlled fallback: If after 300ms contextmenu event didn't reveal a menu, try hover context menu button.
+        // NEVER double-toggle with unconditional click if a menu is already found!
+        if (!fallbackClicked && !targetMenu && Date.now() - startTime >= 300) {
+          const msgParent = actionEl.closest ? actionEl.closest("div[data-id][data-testid^='conv-msg-'], div[data-id], .message-in, .message-out") : null;
+          if (msgParent && typeof msgParent.querySelector === "function") {
+            const menuBtn = msgParent.querySelector(
+              "button[aria-label*='Context menu' i], button[aria-label*='قائمة السياق' i], [data-testid='down-context'], [data-icon='down-context']"
+            );
+            if (menuBtn && typeof menuBtn.click === "function") {
+              menuBtn.click();
+              fallbackClicked = true;
+            }
           }
         }
       }
@@ -398,6 +459,7 @@
       return { success: false, error: e.message };
     }
   }
+
 
   /**
    * Detect all attachments on a message element (audio, video, document, image, other).
@@ -608,57 +670,107 @@
     doc = (typeof document !== "undefined" ? document : null)
   } = {}) {
     if (checkCancelled()) {
-      return { status: "failed", error: "cancelled" };
+      return { status: "failed", error: "cancelled", reason: "cancelled_by_user", stage: "media_acquisition" };
     }
 
     if (UNSUPPORTED_EXTENSIONS.has(getExtension(att.file_name))) {
-      return { status: "unsupported", file_name: att.file_name };
+      return { status: "unsupported", file_name: att.file_name, reason: "unsupported", stage: "media_acquisition" };
     }
 
     let targetUrl = att.blob_url;
+    let downloadCaptured = false;
+    let armed = false;
+    let menuReason = null;
+    let attemptId = null;
 
     // Activate visible page download / context menu download if exposed and no direct blob is ready
     if (!targetUrl && bridgeSender) {
       const triggerTarget = att.download_el || att.container_el;
       if (triggerTarget || att.can_context_download) {
+        attemptId = `att_attempt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const armTimeout = Math.min(Math.max(timeoutMs || 20000, 15000), 60000);
         try {
-          await bridgeSender({
+          const armRes = await bridgeSender({
             action: "bridge_arm_download_capture",
+            attemptId,
             expectedFilename: att.file_name,
             expectedType: att.file_type,
-            timeoutMs: timeoutMs || 10000
+            timeoutMs: armTimeout
           });
+          if (!armRes || !armRes.success) {
+            return {
+              status: "unavailable",
+              file_name: att.file_name,
+              reason: "arm_failed",
+              error: armRes?.error || "arm_failed",
+              stage: "media_acquisition"
+            };
+          }
+          armed = true;
+
+          if (checkCancelled()) {
+            return { status: "failed", error: "cancelled", reason: "cancelled_by_user", stage: "media_acquisition" };
+          }
 
           let triggered = false;
-          // Try user-visible context menu Download action first (e.g. for voice note / document)
-          if (triggerTarget) {
-            const menuRes = await triggerContextMenuDownload(triggerTarget, { doc, timeoutMs: 2000 });
+          // For direct document cards, try clicking the download element first
+          if (att.file_type === "document" && att.download_el && typeof att.download_el.click === "function") {
+            att.download_el.click();
+            triggered = true;
+          }
+
+          // Otherwise or fallback: try user-visible context menu Download action (e.g. for voice note)
+          if (!triggered && triggerTarget) {
+            const menuRes = await triggerContextMenuDownload(triggerTarget, {
+              doc,
+              timeoutMs: Math.max(3000, Math.min(timeoutMs || 3000, 5000)),
+              checkCancelled
+            });
             if (menuRes && menuRes.success) {
               triggered = true;
+            } else if (menuRes && menuRes.reason) {
+              menuReason = menuRes.reason;
             }
           }
 
-          // Fallback to direct element click if context menu download did not trigger
+          // Direct click fallback if context menu was not successful
           if (!triggered && att.download_el && typeof att.download_el.click === "function") {
             att.download_el.click();
             triggered = true;
           }
 
+          if (checkCancelled()) {
+            return { status: "failed", error: "cancelled", reason: "cancelled_by_user", stage: "media_acquisition" };
+          }
+
           if (triggered) {
-            const dlRes = await bridgeSender({ action: "bridge_await_download" });
+            const dlRes = await bridgeSender({ action: "bridge_await_download", attemptId });
+            if (checkCancelled()) {
+              return { status: "failed", error: "cancelled", reason: "cancelled_by_user", stage: "media_acquisition" };
+            }
             if (dlRes && dlRes.success && dlRes.downloadPath) {
+              downloadCaptured = true;
               return {
                 status: "saved-original",
                 download_path: dlRes.downloadPath,
                 file_size: dlRes.fileSize || 0,
                 file_name: att.file_name,
                 file_type: att.file_type,
-                mime_type: dlRes.mime || att.mime_type
+                mime_type: dlRes.mime || att.mime_type,
+                stage: "media_acquisition"
               };
+            } else {
+              menuReason = dlRes?.error_code || dlRes?.error || "download_timeout";
             }
           }
         } catch (e) {
-          // Fall through
+          menuReason = e.message || "download_failed";
+        } finally {
+          if (!downloadCaptured && armed) {
+            try {
+              await bridgeSender({ action: "bridge_disarm_download_capture", attemptId });
+            } catch (e) {}
+          }
         }
       }
     }
@@ -668,15 +780,23 @@
       return {
         status: "unavailable",
         file_name: att.file_name,
-        reason: "voice_note_no_dom_src"
+        reason: menuReason || att.diagnostic_reason || "voice_note_no_dom_src",
+        error: menuReason || null,
+        stage: "media_acquisition"
       };
     }
 
     if (!targetUrl) {
       if (att.is_thumbnail_only) {
-        return { status: "preview-only", file_name: att.file_name };
+        return { status: "preview-only", file_name: att.file_name, reason: "thumbnail_only", stage: "media_acquisition" };
       }
-      return { status: "unavailable", file_name: att.file_name, reason: att.diagnostic_reason || null };
+      return {
+        status: "unavailable",
+        file_name: att.file_name,
+        reason: menuReason || att.diagnostic_reason || (att.file_type === "document" ? "document_download_untriggered" : "no_target_element"),
+        error: menuReason || null,
+        stage: "media_acquisition"
+      };
     }
 
     // Handle data: URIs (e.g. preview data URL)
@@ -919,101 +1039,154 @@
    * Inspects preceding date dividers or neighboring dated message rows in the container.
    * Never falls back to the current date.
    */
+  function getSeparatorInfoFromNode(node) {
+    if (!node) return null;
+    // Must not be a message node or contain message content
+    if (typeof node.getAttribute === "function") {
+      const dataId = node.getAttribute("data-id");
+      const testId = node.getAttribute("data-testid") || "";
+      if (dataId || testId.startsWith("conv-msg-")) return null;
+    }
+    if (typeof node.querySelector === "function") {
+      if (node.querySelector("div[data-id], [data-testid^='conv-msg-'], .selectable-text, .copyable-text, [data-pre-plain-text], [data-testid='msg-meta']")) {
+        return null;
+      }
+    }
+
+    const text = (node.innerText || node.textContent || "").trim();
+    if (!text || text.length > 50) return null;
+
+    const cleaned = DateParser.cleanBidi(text).trim().toLowerCase();
+
+    // 1. Explicit separator or badge attributes
+    const testId = typeof node.getAttribute === "function" ? (node.getAttribute("data-testid") || "") : "";
+    const role = typeof node.getAttribute === "function" ? (node.getAttribute("role") || "") : "";
+    const isExplicit = testId === "date-divider" || testId === "date-badge" || role === "separator" || (node.classList && (node.classList.contains("date-divider") || node.classList.contains("date-badge")));
+
+    // 2. Relative (Today / Yesterday)
+    if (cleaned === "today" || cleaned === "اليوم" || cleaned === "yesterday" || cleaned === "أمس") {
+      return { type: "relative", text: cleaned, date: DateParser.parseDateDivider(text) };
+    }
+
+    // 3. Weekday
+    const weekday = DateParser.parseWeekday ? DateParser.parseWeekday(cleaned) : null;
+    if (weekday !== null) {
+      return { type: "weekday", text: cleaned, weekday };
+    }
+
+    // 4. Absolute date
+    const words = cleaned.replace(/[,،]/g, " ").split(/\s+/).filter(Boolean);
+    if (isExplicit || words.length <= 4) {
+      const absDate = DateParser.extractAbsoluteDateFromText(text);
+      if (absDate) {
+        return { type: "absolute", text: cleaned, date: absDate };
+      }
+    }
+
+    return null;
+  }
+
+  function getDateFromPrePlain(node) {
+    if (!node) return null;
+    let preAttr = typeof node.getAttribute === "function" ? node.getAttribute("data-pre-plain-text") : null;
+    if (!preAttr && typeof node.querySelector === "function") {
+      const preEl = node.querySelector("[data-pre-plain-text]");
+      if (preEl && typeof preEl.getAttribute === "function") {
+        preAttr = preEl.getAttribute("data-pre-plain-text");
+      }
+    }
+    if (preAttr) {
+      return DateParser.extractAbsoluteDateFromText(preAttr);
+    }
+    return null;
+  }
+
+  /**
+   * Find a defensible calendar date for an element without data-pre-plain-text (e.g. media-only message).
+   * Inspects preceding date dividers or neighboring dated message rows across nested wrappers.
+   * Resolves within day boundaries without crossing an explicit different day; never falls back to current date.
+   */
   function findDefensibleDateForElement(el, container = null) {
     if (!el) return null;
-    const root = container || (el.parentElement ? el.parentElement : null);
+    const root = container || null;
 
-    function getDateFromNode(node) {
-      if (!node) return null;
+    let datedMsgBefore = null;
+    let sepBefore = null;
 
-      // 1. Check if node itself has date divider testid or text
-      const isDivider = (
-        (typeof node.getAttribute === "function" && (
-          node.getAttribute("data-testid") === "date-divider" ||
-          node.getAttribute("data-testid") === "date-badge" ||
-          node.getAttribute("role") === "separator"
-        )) ||
-        (node.classList && (
-          node.classList.contains("date-divider") ||
-          node.classList.contains("date-badge")
-        ))
-      );
-
-      const text = (node.innerText || node.textContent || "").trim();
-      if (isDivider && text) {
-        const parsed = DateParser.parseDateDivider(text);
-        if (parsed) return parsed;
+    // Backward search across nested wrappers
+    let curr = el;
+    let depth = 0;
+    while (curr && curr !== root && depth < 10) {
+      let prev = curr.previousElementSibling;
+      while (prev) {
+        const sep = getSeparatorInfoFromNode(prev);
+        if (sep) {
+          sepBefore = sep;
+          break;
+        }
+        if (!datedMsgBefore) {
+          const d = getDateFromPrePlain(prev);
+          if (d) datedMsgBefore = d;
+        }
+        prev = prev.previousElementSibling;
       }
+      if (sepBefore) break;
+      curr = curr.parentElement;
+      depth++;
+    }
 
-      // Check child date divider or span[dir="auto"]
-      if (typeof node.querySelectorAll === "function") {
-        const spans = node.querySelectorAll("[data-testid='date-divider'], [data-testid='date-badge'], [role='separator'], span[dir='auto']");
-        for (const s of spans) {
-          const sText = (s.innerText || s.textContent || "").trim();
-          if (sText) {
-            const parsed = DateParser.parseDateDivider(sText);
-            if (parsed) return parsed;
+    // Forward search across nested wrappers (stopping immediately at any date separator / day boundary)
+    let datedMsgAfter = null;
+    let sepAfter = null;
+    curr = el;
+    depth = 0;
+    while (curr && curr !== root && depth < 10) {
+      let next = curr.nextElementSibling;
+      while (next) {
+        const sep = getSeparatorInfoFromNode(next);
+        if (sep) {
+          sepAfter = sep;
+          break;
+        }
+        if (!datedMsgAfter) {
+          const d = getDateFromPrePlain(next);
+          if (d) {
+            datedMsgAfter = d;
+            break;
           }
         }
+        next = next.nextElementSibling;
       }
-
-      // 2. Check if node is a message row with data-pre-plain-text
-      if (typeof node.querySelector === "function") {
-        const prePlainEl = (typeof node.getAttribute === "function" && node.getAttribute("data-pre-plain-text"))
-          ? node
-          : node.querySelector("[data-pre-plain-text]");
-        if (prePlainEl) {
-          const preText = prePlainEl.getAttribute("data-pre-plain-text");
-          if (preText) {
-            const extracted = DateParser.extractAbsoluteDateFromText(preText);
-            if (extracted) return extracted;
-          }
-        }
-      }
-
-      return null;
+      if (sepAfter || datedMsgAfter) break;
+      curr = curr.parentElement;
+      depth++;
     }
 
-    // A. Backward search through previous siblings
-    let curr = el.previousElementSibling;
-    while (curr) {
-      const d = getDateFromNode(curr);
-      if (d) return d;
-      curr = curr.previousElementSibling;
-    }
-
-    // B. If el is nested, check parent's previous siblings up to root
-    let parent = el.parentElement;
-    while (parent && parent !== root && parent !== (typeof document !== "undefined" ? document.body : null)) {
-      let pCurr = parent.previousElementSibling;
-      while (pCurr) {
-        const d = getDateFromNode(pCurr);
-        if (d) return d;
-        pCurr = pCurr.previousElementSibling;
+    // 1. Within day boundary: preceding dated message
+    if (datedMsgBefore) {
+      if (sepBefore && sepBefore.type === "weekday") {
+        return DateParser.resolveWeekdayWithAnchor(sepBefore.text, datedMsgBefore);
       }
-      parent = parent.parentElement;
+      return datedMsgBefore;
     }
 
-    // C. Forward search: look at following sibling messages before any date divider
-    curr = el.nextElementSibling;
-    while (curr) {
-      const isDivider = typeof curr.getAttribute === "function" && (
-        curr.getAttribute("data-testid") === "date-divider" ||
-        curr.getAttribute("role") === "separator"
-      );
-      if (isDivider) break;
+    // 2. Preceding separator (absolute / relative)
+    if (sepBefore && (sepBefore.type === "absolute" || sepBefore.type === "relative")) {
+      return sepBefore.date;
+    }
 
-      const prePlainEl = typeof curr.querySelector === "function" ? curr.querySelector("[data-pre-plain-text]") : null;
-      if (prePlainEl) {
-        const preText = prePlainEl.getAttribute("data-pre-plain-text");
-        if (preText) {
-          const extracted = DateParser.extractAbsoluteDateFromText(preText);
-          if (extracted) return extracted;
-        }
+    // 3. Within day boundary: following dated message
+    if (datedMsgAfter) {
+      if (sepBefore && sepBefore.type === "weekday") {
+        return DateParser.resolveWeekdayWithAnchor(sepBefore.text, datedMsgAfter);
       }
-      curr = curr.nextElementSibling;
+      if (sepAfter && sepAfter.type === "weekday") {
+        return DateParser.resolveWeekdayWithAnchor(sepAfter.text, datedMsgAfter);
+      }
+      return datedMsgAfter;
     }
 
+    // 4. Bare weekday alone without matching adjacent row in same day group is unresolved
     return null;
   }
 
@@ -1024,10 +1197,24 @@
     const isOutgoing = el.classList?.contains("message-out") || el.getAttribute("data-id")?.startsWith("true_");
     const platformMsgId = el.getAttribute("data-id") || null;
 
-    const textEl = el.querySelector ? el.querySelector(".selectable-text, .copyable-text") : null;
-    const prePlainAttr = textEl
-      ? textEl.getAttribute("data-pre-plain-text")
-      : (el.querySelector ? el.querySelector("[data-pre-plain-text]")?.getAttribute("data-pre-plain-text") : null);
+    const selectableEl = el.querySelector ? el.querySelector(".selectable-text") : null;
+    const copyableEl = el.querySelector ? el.querySelector(".copyable-text") : null;
+    const textEl = selectableEl || copyableEl;
+
+    // Independent lookup of data-pre-plain-text: check el, descendant, or ancestor of text elements
+    let prePlainAttr = (typeof el.getAttribute === "function" && el.getAttribute("data-pre-plain-text")) || null;
+    if (!prePlainAttr && typeof el.querySelector === "function") {
+      const preEl = el.querySelector("[data-pre-plain-text]");
+      if (preEl && typeof preEl.getAttribute === "function") {
+        prePlainAttr = preEl.getAttribute("data-pre-plain-text");
+      }
+    }
+    if (!prePlainAttr && textEl && typeof textEl.closest === "function") {
+      const anc = textEl.closest("[data-pre-plain-text]");
+      if (anc && typeof anc.getAttribute === "function") {
+        prePlainAttr = anc.getAttribute("data-pre-plain-text");
+      }
+    }
 
     let senderName = isOutgoing ? "You" : chatTitle;
     let rawTimestamp = null;
@@ -1045,7 +1232,14 @@
       }
     }
 
-    let textContent = textEl ? (textEl.innerText || textEl.textContent || "").trim() : "";
+    let textContent = "";
+    if (selectableEl) {
+      textContent = (selectableEl.innerText || selectableEl.textContent || "").trim();
+    } else if (copyableEl) {
+      textContent = (copyableEl.innerText || copyableEl.textContent || "").trim();
+    } else if (textEl) {
+      textContent = (textEl.innerText || textEl.textContent || "").trim();
+    }
 
     let parsedDate = null;
     let isoTimestamp = null;
@@ -1129,6 +1323,7 @@
       }
     }
 
+    const isSkeleton = !rawTimestamp && !hasMedia && (!textContent || textContent === "[text]" || textContent === "");
     const msgKey = platformMsgId || generateSyntheticId(senderName, isoTimestamp || rawTimestamp, textContent);
 
     return {
@@ -1145,11 +1340,49 @@
       media_type: mediaType,
       media_filename: mediaFilename,
       attachment_status: attachmentStatus,
-      attachments: detectedAttachments
+      attachments: detectedAttachments,
+      is_skeleton: isSkeleton
     };
   }
 
-  async function scanCurrentDOMMessages(container, chatTitle, dateOrder, messageMap, options = {}) {
+  function getCanonicalMessageNodes(container) {
+    if (!container || typeof container.querySelectorAll !== "function") return [];
+    const rawNodes = container.querySelectorAll("div[data-id][data-testid^='conv-msg-'], div[data-id], .message-in, .message-out");
+    const canonical = [];
+    const seenIds = new Set();
+
+    for (const node of rawNodes) {
+      if (typeof node.closest === "function") {
+        const parentMsg = node.closest("div[data-id][data-testid^='conv-msg-'], div[data-id]");
+        if (parentMsg && parentMsg !== node) {
+          continue;
+        }
+      } else {
+        let p = node.parentElement;
+        let hasParentMsg = false;
+        while (p && p !== container) {
+          if (typeof p.getAttribute === "function" && p.getAttribute("data-id")) {
+            hasParentMsg = true;
+            break;
+          }
+          p = p.parentElement;
+        }
+        if (hasParentMsg) continue;
+      }
+
+      const dataId = typeof node.getAttribute === "function" ? node.getAttribute("data-id") : null;
+      if (dataId) {
+        if (seenIds.has(dataId)) continue;
+        seenIds.add(dataId);
+      }
+
+      canonical.push(node);
+    }
+
+    return canonical;
+  }
+
+  async function processItemMedia(item, scanOpts = {}) {
     const {
       captureMedia = false,
       onMediaCaptured = null,
@@ -1159,44 +1392,158 @@
       sessionId = null,
       fetchFn = (typeof fetch !== "undefined" ? fetch : null),
       checkCancelled = () => false,
-      doc = (typeof document !== "undefined" ? document : null)
-    } = options;
+      doc = (typeof document !== "undefined" ? document : null),
+      fromDate = null,
+      toDate = null,
+      mode = null,
+      trackedAttachments = null,
+      chatTitle = null,
+      existingItem = null
+    } = scanOpts;
 
-    const msgNodes = container.querySelectorAll("div[data-id][data-testid^='conv-msg-'], div[data-id], .message-in, .message-out");
-    let newlyFound = 0;
-    for (const node of msgNodes) {
-      const item = parseMessageNode(node, chatTitle, dateOrder, container);
-      if (item && item.key && !messageMap.has(item.key)) {
-        if (captureMedia && item.has_media && item.attachments && item.attachments.length > 0) {
-          for (let attIdx = 0; attIdx < item.attachments.length; attIdx++) {
-            const att = item.attachments[attIdx];
-            const captured = await captureAttachmentOriginalBytes(att, { checkCancelled, fetchFn, bridgeSender, doc });
-            att.attachment_status = captured.status;
-            att.sha256 = captured.sha256 || null;
-            att.file_size = captured.file_size || 0;
-            att.download_path = captured.download_path || null;
-            if (captured.status === "saved-original" && (captured.bytes || captured.download_path)) {
-              if (captured.bytes) att.bytes = captured.bytes;
-              await uploadCapturedMediaItem({
-                attachment: att,
-                attachmentPosition: attIdx + 1,
-                conversationId: targetConversationId,
-                confirmTargetMerge,
-                platformMsgId: item.platform_msg_id,
-                messageKey: item.key,
-                sessionId,
-                chatTitle,
-                bridgeSender
-              });
-            }
-            if (typeof onMediaCaptured === "function") {
-              onMediaCaptured(att);
-            }
+    if (!captureMedia || !item.has_media || !item.attachments || item.attachments.length === 0) {
+      return;
+    }
+
+    // DATE-RANGE GATE BEFORE MEDIA ACQUISITION:
+    if (mode === "date_range" || fromDate || toDate) {
+      const fromTime = fromDate ? new Date(fromDate).getTime() : -Infinity;
+      const toTime = toDate ? new Date(toDate).getTime() : Infinity;
+      if (!item.parsed_date) {
+        return; // Unverified / unparseable timestamp: do not acquire media
+      }
+      const t = item.parsed_date.getTime();
+      if (t < fromTime || t > toTime) {
+        return; // Out of range: do not acquire media
+      }
+    }
+
+    const mediaRetryCounts = scanOpts.mediaRetryCounts || (scanOpts.mediaRetryCounts = new Map());
+
+    for (let attIdx = 0; attIdx < item.attachments.length; attIdx++) {
+      if (checkCancelled()) break;
+      const att = item.attachments[attIdx];
+      const durableKey = `${item.platform_msg_id || item.key}_att_${att.id || attIdx}_${att.file_name}`;
+
+      // 1. Preserve successful perattachment result on later scans:
+      if (trackedAttachments && trackedAttachments.get(durableKey) === "saved-original") {
+        att.attachment_status = "saved-original";
+        if (existingItem && existingItem.attachments) {
+          const exAtt = existingItem.attachments.find(a => (a.file_name === att.file_name) || (a.id === att.id));
+          if (exAtt && exAtt.attachment_status === "saved-original") {
+            att.download_path = exAtt.download_path || att.download_path;
+            att.bytes = exAtt.bytes || att.bytes;
+            att.sha256 = exAtt.sha256 || att.sha256;
+            att.file_size = exAtt.file_size || att.file_size;
+            att.reason = exAtt.reason || att.reason;
+            att.error = exAtt.error || att.error;
+            att.stage = exAtt.stage || att.stage;
           }
-          item.attachment_status = item.attachments[0].attachment_status;
         }
+        continue;
+      }
+
+      // 2. Retry transient unavailable media with bounded count (e.g. max 2 retries)
+      const prevRetries = mediaRetryCounts.get(durableKey) || 0;
+      if (prevRetries >= 2 && trackedAttachments && trackedAttachments.get(durableKey) === "unavailable") {
+        att.attachment_status = "unavailable";
+        continue;
+      }
+      mediaRetryCounts.set(durableKey, prevRetries + 1);
+
+      const captured = await captureAttachmentOriginalBytes(att, { checkCancelled, fetchFn, bridgeSender, doc });
+      att.attachment_status = captured.status;
+      att.sha256 = captured.sha256 || null;
+      att.file_size = captured.file_size || 0;
+      att.download_path = captured.download_path || null;
+      att.reason = captured.reason || captured.diagnostic_reason || null;
+      att.diagnostic_reason = att.reason;
+      att.error = captured.error || null;
+      att.stage = captured.stage || null;
+
+      if (captured.status === "saved-original" && (captured.bytes || captured.download_path)) {
+        if (captured.bytes) att.bytes = captured.bytes;
+        await uploadCapturedMediaItem({
+          attachment: att,
+          attachmentPosition: attIdx + 1,
+          conversationId: targetConversationId,
+          confirmTargetMerge,
+          platformMsgId: item.platform_msg_id,
+          messageKey: item.key,
+          sessionId,
+          chatTitle,
+          bridgeSender
+        });
+      }
+
+      if (typeof onMediaCaptured === "function") {
+        onMediaCaptured(att, durableKey);
+      }
+
+      // Diagnostics emission for media acquisition:
+      if (att.reason || att.attachment_status !== "saved-original") {
+        try {
+          await DiagLogger.log("media_acquisition", att.attachment_status === "saved-original" ? "SUCCESS" : "PARTIAL", attIdx + 1, att.reason || "ok");
+        } catch (e) {}
+      }
+
+      if (checkCancelled()) break;
+    }
+
+    if (item.attachments.length > 0) {
+      const anySaved = item.attachments.some(a => a.attachment_status === "saved-original");
+      const anyPreview = item.attachments.some(a => a.attachment_status === "preview-only");
+      item.attachment_status = anySaved ? "saved-original" : (anyPreview ? "preview-only" : item.attachments[0].attachment_status);
+    }
+  }
+
+  async function scanCurrentDOMMessages(container, chatTitle, dateOrder, messageMap, options = {}) {
+    const msgNodes = getCanonicalMessageNodes(container);
+    let newlyFound = 0;
+
+    for (const node of msgNodes) {
+      if (options.checkCancelled && options.checkCancelled()) break;
+
+      let item = parseMessageNode(node, chatTitle, dateOrder, container);
+      if (!item || !item.key) continue;
+
+      // Unresolved skeleton node: bounded hydration wait by scrolling into view
+      const isSkeleton = item.is_skeleton || (!item.parsed_date && !item.has_media && (!item.text || item.text === "[text]"));
+      if (isSkeleton && typeof node.scrollIntoView === "function") {
+        try { node.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) {}
+        await sleep(100);
+        const reItem = parseMessageNode(node, chatTitle, dateOrder, container);
+        if (reItem && (!reItem.is_skeleton && (reItem.parsed_date || reItem.has_media || (reItem.text && reItem.text !== "[text]")))) {
+          item = reItem;
+        }
+      }
+
+      const existing = messageMap.get(item.key);
+      const isExistingSkeleton = existing && (existing.is_skeleton || (!existing.parsed_date && !existing.has_media && (!existing.text || existing.text === "[text]")));
+      const isItemHydrated = !item.is_skeleton && (item.parsed_date || item.has_media || (item.text && item.text !== "[text]"));
+      const isDateUpgraded = existing && !existing.parsed_date && item.parsed_date;
+
+      if (!existing) {
+        await processItemMedia(item, { ...options, existingItem: null });
         messageMap.set(item.key, item);
         newlyFound++;
+      } else if (isExistingSkeleton && isItemHydrated) {
+        // Hydration retry: update incomplete skeleton with hydrated message, preserving any saved metadata
+        await processItemMedia(item, { ...options, existingItem: existing });
+        messageMap.set(item.key, item);
+        newlyFound++;
+      } else if (isDateUpgraded) {
+        // Date resolved/upgraded upon further hydration
+        await processItemMedia(item, { ...options, existingItem: existing });
+        messageMap.set(item.key, item);
+        newlyFound++;
+      } else if (existing) {
+        // Transient unavailable retry with bounded count
+        const hasTransientUnavailable = item.attachments && item.attachments.some(a => a.attachment_status === "unavailable");
+        if (hasTransientUnavailable) {
+          await processItemMedia(item, { ...options, existingItem: existing });
+          messageMap.set(item.key, item);
+        }
       }
     }
     return newlyFound;
@@ -1240,7 +1587,12 @@
       unsupported: 0
     };
 
+    const trackedAttachments = new Map();
+
     const scanOpts = {
+      mode,
+      fromDate,
+      toDate,
       captureMedia,
       targetConversationId,
       confirmTargetMerge,
@@ -1250,16 +1602,45 @@
       checkCancelled,
       fetchFn,
       doc,
-      onMediaCaptured: (att) => {
-        attachmentStats.totalDetected++;
-        const s = att.attachment_status;
-        if (s === "saved-original") attachmentStats.savedOriginal++;
-        else if (s === "preview-only") attachmentStats.previewOnly++;
-        else if (s === "unavailable") attachmentStats.unavailable++;
-        else if (s === "expired") attachmentStats.expired++;
-        else if (s === "too-large") attachmentStats.tooLarge++;
-        else if (s === "unsupported") attachmentStats.unsupported++;
-        else if (s === "failed") attachmentStats.failed++;
+      trackedAttachments,
+      onMediaCaptured: (att, durableKey) => {
+        const key = durableKey || att.id || att.file_name;
+        const prevStatus = trackedAttachments.get(key);
+        const newStatus = att.attachment_status;
+
+        function statKey(s) {
+          if (s === "saved-original") return "savedOriginal";
+          if (s === "preview-only") return "previewOnly";
+          if (s === "unavailable") return "unavailable";
+          if (s === "expired") return "expired";
+          if (s === "too-large") return "tooLarge";
+          if (s === "unsupported") return "unsupported";
+          if (s === "failed") return "failed";
+          return null;
+        }
+
+        // Once saved-original, never downgrade
+        if (prevStatus === "saved-original" && newStatus !== "saved-original") {
+          att.attachment_status = "saved-original";
+          return;
+        }
+
+        if (prevStatus === newStatus) {
+          return;
+        }
+
+        if (prevStatus) {
+          const oldK = statKey(prevStatus);
+          if (oldK && attachmentStats[oldK] > 0) {
+            attachmentStats[oldK]--;
+          }
+        }
+        const newK = statKey(newStatus);
+        if (newK) {
+          attachmentStats[newK]++;
+        }
+        trackedAttachments.set(key, newStatus);
+        attachmentStats.totalDetected = trackedAttachments.size;
       }
     };
 
@@ -1280,7 +1661,7 @@
     // Mode A: Visible to Newest
     if (mode === "visible_to_newest") {
       const containerRect = container.getBoundingClientRect();
-      const allMsgs = container.querySelectorAll("div[data-id][data-testid^='conv-msg-'], div[data-id], .message-in, .message-out");
+      const allMsgs = getCanonicalMessageNodes(container);
       let startItem = null;
 
       // Find first visible message in viewport
@@ -1313,35 +1694,11 @@
           foundStart = true;
         }
         if (foundStart && item.key) {
-          if (captureMedia && item.has_media && item.attachments && item.attachments.length > 0) {
-            for (let attIdx = 0; attIdx < item.attachments.length; attIdx++) {
-              const att = item.attachments[attIdx];
-              const captured = await captureAttachmentOriginalBytes(att, { checkCancelled, fetchFn, bridgeSender, doc });
-              att.attachment_status = captured.status;
-              att.sha256 = captured.sha256 || null;
-              att.file_size = captured.file_size || 0;
-              att.download_path = captured.download_path || null;
-              if (captured.status === "saved-original" && (captured.bytes || captured.download_path)) {
-                if (captured.bytes) att.bytes = captured.bytes;
-                await uploadCapturedMediaItem({
-                  attachment: att,
-                  attachmentPosition: attIdx + 1,
-                  conversationId: targetConversationId,
-                  confirmTargetMerge,
-                  platformMsgId: item.platform_msg_id,
-                  messageKey: item.key,
-                  sessionId: captureSessionId,
-                  chatTitle: initialChatTitle,
-                  bridgeSender
-                });
-              }
-              scanOpts.onMediaCaptured(att);
-            }
-            item.attachment_status = item.attachments[0].attachment_status;
-          }
+          await processItemMedia(item, scanOpts);
           messageMap.set(item.key, item);
         }
       }
+
 
       // Stepwise scroll down to newest message
       let noChangeCount = 0;
@@ -1731,7 +2088,10 @@
           file_size: a.file_size || 0,
           sha256: a.sha256 || null,
           attachment_position: a.attachment_position || (aIdx + 1),
-          attachment_status: a.attachment_status || "none"
+          attachment_status: a.attachment_status || "none",
+          reason: a.reason || a.diagnostic_reason || null,
+          error: a.error || null,
+          stage: a.stage || null
         })) : []
       }))
     };

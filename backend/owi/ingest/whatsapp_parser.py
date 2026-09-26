@@ -42,7 +42,7 @@ SYSTEM_INDICATORS = [
 ATTACHMENT_PATTERNS = [
     re.compile(r"^(?P<file>[^\n]+?)\s+\((?:file attached|ملف مرفق)\)", re.IGNORECASE),
     re.compile(r"^<attached:\s*(?P<file>[^\n>]+)>", re.IGNORECASE),
-    re.compile(r"^<?(?:image|audio|video|document|voice note|sticker|GIF|media) omitted>?", re.IGNORECASE),
+    re.compile(r"^<?(?:image|audio|video|document|voice note|voice message|sticker|GIF|media) omitted>?", re.IGNORECASE),
     re.compile(r"^<.*(?:مستبعد|مفقود).*>", re.IGNORECASE),
 ]
 

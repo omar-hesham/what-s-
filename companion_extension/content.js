@@ -51,6 +51,11 @@
     // 2. Cancel Bulk Capture
     if (request.action === "cancel_bulk_capture") {
       cancelRequested = true;
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({ action: "bridge_disarm_download_capture" }, () => {});
+        } catch (e) {}
+      }
       sendResponse({ status: "cancelling" });
       return true;
     }

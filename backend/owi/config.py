@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     COMPANION_SECRET_KEY: str = "owi-companion-local-bridge-key-2026"
     CHROME_DOWNLOADS_DIR: Optional[Path] = None
     DOWNLOADS_DIR: Optional[Path] = None
+    REPORT_TIMEZONE: str = os.getenv("REPORT_TIMEZONE", "Africa/Cairo")
     
     # Performance Profiles: LIGHT, BALANCED, QUALITY
     PERFORMANCE_PROFILE: Literal["LIGHT", "BALANCED", "QUALITY"] = "BALANCED"

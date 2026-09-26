@@ -264,11 +264,67 @@
     return null;
   }
 
+  const WEEKDAY_MAP = {
+    "sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4, "friday": 5, "saturday": 6,
+    "الأحد": 0, "الاحد": 0,
+    "الإثنين": 1, "الاثنين": 1,
+    "الثلاثاء": 2,
+    "الأربعاء": 3, "الاربعاء": 3,
+    "الخميس": 4,
+    "الجمعة": 5,
+    "السبت": 6
+  };
+
+  /**
+   * Parse a weekday name in English or Arabic into its 0-6 index (0 = Sunday).
+   */
+  function parseWeekday(text) {
+    if (!text || typeof text !== "string") return null;
+    const cleaned = cleanBidi(text).trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(WEEKDAY_MAP, cleaned)) {
+      return WEEKDAY_MAP[cleaned];
+    }
+    return null;
+  }
+
+  /**
+   * Resolve an exact weekday into DD/MM/YYYY given a nearby absolute anchor date.
+   * Standalone weekday without absolute anchor remains unresolved (returns null).
+   */
+  function resolveWeekdayWithAnchor(weekdayText, anchorDate) {
+    const targetDay = parseWeekday(weekdayText);
+    if (targetDay === null) return null;
+    if (!anchorDate) return null;
+
+    let aDate = null;
+    if (anchorDate instanceof Date) {
+      aDate = new Date(anchorDate.getTime());
+    } else if (typeof anchorDate === "string") {
+      const m = anchorDate.match(/^(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})$/);
+      if (m) {
+        aDate = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+      } else {
+        const p = parseWhatsAppTimestamp(anchorDate);
+        if (p) aDate = p.date;
+      }
+    }
+    if (!aDate || isNaN(aDate.getTime())) return null;
+
+    const anchorDay = aDate.getDay();
+    // Only resolve if anchor matches the weekday exactly (no nearest-weekday arithmetic)
+    if (targetDay === anchorDay) {
+      return `${pad(aDate.getDate(), 2)}/${pad(aDate.getMonth() + 1, 2)}/${pad(aDate.getFullYear(), 4)}`;
+    }
+
+    return null;
+  }
+
   /**
    * Parse a date divider text into DD/MM/YYYY.
-   * Handles absolute dates as well as TODAY / YESTERDAY (and Arabic equivalents).
+   * Handles absolute dates, TODAY / YESTERDAY (and Arabic equivalents),
+   * and weekdays with explicit anchor evidence (standalone weekday remains null).
    */
-  function parseDateDivider(text, refDate = new Date()) {
+  function parseDateDivider(text, refDate = new Date(), options = {}) {
     if (!text || typeof text !== "string") return null;
     const cleaned = cleanBidi(text).trim().toLowerCase();
 
@@ -281,7 +337,12 @@
       return `${pad(d.getDate(), 2)}/${pad(d.getMonth() + 1, 2)}/${pad(d.getFullYear(), 4)}`;
     }
 
-    return extractAbsoluteDateFromText(text);
+    const anchor = options.anchorDate || null;
+    if (anchor && parseWeekday(cleaned) !== null) {
+      return resolveWeekdayWithAnchor(cleaned, anchor);
+    }
+
+    return extractAbsoluteDateFromText(text, options);
   }
 
   /**
@@ -299,7 +360,10 @@
     normalizeAmPm,
     parseWhatsAppTimestamp,
     extractAbsoluteDateFromText,
+    parseWeekday,
+    resolveWeekdayWithAnchor,
     parseDateDivider,
     combineTimeAndDate
   };
 });
+

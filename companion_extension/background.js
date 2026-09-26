@@ -734,17 +734,21 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
   // 2g. Download Capture Arming Bridge
   if (message.action === "bridge_arm_download_capture") {
     lastCompletedDownloadResult = null;
-    const timeoutMs = message.timeoutMs || 10000;
+    const timeoutMs = Math.min(Math.max(message.timeoutMs || 15000, 15000), 60000);
     if (pendingDownload && pendingDownload.timer) {
       clearTimeout(pendingDownload.timer);
     }
 
     const armedTime = Date.now();
+    const attemptId = message.attemptId || `arm_${armedTime}_${Math.random().toString(36).substring(2, 8)}`;
     let completeFn = null;
     const promise = new Promise((resolve) => {
       completeFn = (result) => {
         if (pendingDownload && pendingDownload.timer) {
           clearTimeout(pendingDownload.timer);
+        }
+        if (result && typeof result === "object") {
+          result.attemptId = attemptId;
         }
         lastCompletedDownloadResult = result;
         pendingDownload = null;
@@ -754,11 +758,12 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
 
     const timer = setTimeout(() => {
       if (completeFn) {
-        completeFn({ success: false, error_code: "DOWNLOAD_TIMEOUT", error: "Download wait timed out" });
+        completeFn({ success: false, error_code: "DOWNLOAD_TIMEOUT", error: "Download wait timed out", attemptId });
       }
     }, timeoutMs);
 
     pendingDownload = {
+      attemptId,
       armedTime,
       expectedFilename: message.expectedFilename || null,
       expectedType: message.expectedType || null,
@@ -772,7 +777,7 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
     if (injectedDeps.onDownloadArmed) {
       injectedDeps.onDownloadArmed(pendingDownload);
     }
-    sendResponse({ success: true, status: "armed" });
+    sendResponse({ success: true, status: "armed", attemptId });
     return true;
   }
 
@@ -781,6 +786,10 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
     if (lastCompletedDownloadResult) {
       const res = lastCompletedDownloadResult;
       lastCompletedDownloadResult = null;
+      if (message.attemptId && res.attemptId && message.attemptId !== res.attemptId) {
+        sendResponse({ success: false, error_code: "STALE_DOWNLOAD", error: "Download attempt mismatch" });
+        return true;
+      }
       sendResponse(res);
       return true;
     }
@@ -788,10 +797,32 @@ async function handleRuntimeMessage(message, sender, sendResponse, injectedDeps 
       sendResponse({ success: false, error_code: "NO_ARMED_DOWNLOAD", error: "No download currently armed" });
       return true;
     }
+    if (message.attemptId && pendingDownload.attemptId && message.attemptId !== pendingDownload.attemptId) {
+      sendResponse({ success: false, error_code: "STALE_DOWNLOAD", error: "Download attempt mismatch" });
+      return true;
+    }
     pendingDownload.promise.then((result) => {
       lastCompletedDownloadResult = null;
       sendResponse(result);
     });
+    return true;
+  }
+
+  // 2h2. Download Capture Disarming Bridge
+  if (message.action === "bridge_disarm_download_capture") {
+    if (pendingDownload) {
+      if (!message.attemptId || !pendingDownload.attemptId || message.attemptId === pendingDownload.attemptId) {
+        if (pendingDownload.timer) {
+          clearTimeout(pendingDownload.timer);
+        }
+        if (typeof pendingDownload.complete === "function") {
+          pendingDownload.complete({ success: false, error_code: "DISARMED", error: "Download capture explicitly disarmed" });
+        }
+        pendingDownload = null;
+      }
+    }
+    lastCompletedDownloadResult = null;
+    sendResponse({ success: true, status: "disarmed" });
     return true;
   }
 

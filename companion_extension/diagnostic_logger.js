@@ -18,7 +18,8 @@
   const STORAGE_KEY = "owi_diagnostic_logs";
 
   const ALLOWED_STAGES = [
-    "init", "pairing", "scroll_up", "scroll_down", "ingest_chunk", "cancel", "summary", "general"
+    "init", "pairing", "scroll_up", "scroll_down", "ingest_chunk", "cancel", "summary", "general",
+    "media_acquisition", "menu_discovery"
   ];
 
   const ALLOWED_CODES = [
@@ -46,6 +47,17 @@
     "older_messages_button_unexhausted",
     "clicked_older_messages_button",
     "auth_rejected",
+    "voice_note_no_dom_src",
+    "no_target_element",
+    "download_menu_item_not_found",
+    "document_download_untriggered",
+    "download_timeout",
+    "download_failed",
+    "stale_menu_detected",
+    "arm_failed",
+    "transient_unavailable",
+    "hydration_timeout",
+    "disarmed",
     "ok"
   ];
 

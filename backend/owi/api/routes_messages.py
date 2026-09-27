@@ -33,7 +33,7 @@ def get_conversation_messages(
     conversation_id: int,
     message_type: Optional[str] = Query(None, description="Filter: text, voice, image, video, document"),
     sender: Optional[str] = Query(None),
-    limit: int = 200,
+    limit: int = Query(500, ge=1, le=10000),
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
@@ -76,7 +76,7 @@ def get_conversation_messages(
                     "title": a.document_record.title,
                     "doc_type": a.document_record.doc_type,
                     "page_count": a.document_record.page_count,
-                    "extracted_text": a.document_record.extracted_text[:400]
+                    "extracted_text": a.document_record.extracted_text[:5000] if a.document_record.extracted_text else ""
                 }
 
             assets_data.append({

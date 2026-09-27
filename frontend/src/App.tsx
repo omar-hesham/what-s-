@@ -58,10 +58,13 @@ export const App: React.FC = () => {
 
   const loadInitialData = async () => {
     try {
+      await apiClient.ensureSession();
       const convList = await apiClient.getConversations();
       setConversations(convList);
       if (convList.length > 0 && selectedConversationId === null) {
-        setSelectedConversationId(convList[0].id);
+        // Default to Conversation 13 if present, otherwise first
+        const hConv = convList.find(c => c.id === 13);
+        setSelectedConversationId(hConv ? hConv.id : convList[0].id);
       } else if (convList.length === 0) {
         // Show onboarding wizard if no conversations exist yet
         setFirstRunOpen(true);

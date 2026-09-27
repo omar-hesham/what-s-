@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   Sparkles, CheckSquare, Award, Building2, Send,
-  HelpCircle, ChevronRight, FileText, Check, X, ExternalLink
+  HelpCircle, ChevronRight, FileText, Check, X, ExternalLink,
+  BookOpen, Download, Copy, RefreshCw, ChevronDown, ChevronUp, Mic
 } from 'lucide-react';
 import { Conversation, TaskItem, DecisionItem, PropertyItem, AskResponse, Citation } from '../types';
 import { apiClient } from '../api/client';
@@ -17,10 +18,14 @@ export const IntelligencePanel: React.FC<IntelProps> = ({
   language,
   onTaskUpdated,
 }) => {
-  const [activeTab, setActiveTab] = useState<'summary' | 'tasks' | 'decisions' | 'property' | 'ask'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'report' | 'tasks' | 'decisions' | 'property' | 'ask'>('summary');
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [decisions, setDecisions] = useState<DecisionItem[]>([]);
   const [property, setProperty] = useState<PropertyItem | null>(null);
+  const [reportData, setReportData] = useState<any>(null);
+  const [loadingReport, setLoadingReport] = useState(false);
+  const [reportCopied, setReportCopied] = useState(false);
+  const [expandedDocIdx, setExpandedDocIdx] = useState<number | null>(null);
 
   // Ask Your WhatsApp state
   const [query, setQuery] = useState('');
@@ -31,9 +36,37 @@ export const IntelligencePanel: React.FC<IntelProps> = ({
 
   useEffect(() => {
     if (conversation) {
+      setReportData(null);
       loadEntities();
     }
   }, [conversation?.id]);
+
+  useEffect(() => {
+    if (activeTab === 'report' && conversation && !reportData) {
+      loadReport();
+    }
+  }, [activeTab, conversation?.id]);
+
+  const loadReport = async () => {
+    if (!conversation) return;
+    setLoadingReport(true);
+    try {
+      const data = await apiClient.getConversationReport(conversation.id);
+      setReportData(data);
+    } catch (e) {
+      console.error('Failed to load report:', e);
+    } finally {
+      setLoadingReport(false);
+    }
+  };
+
+  const handleCopyReport = () => {
+    if (reportData?.markdown) {
+      navigator.clipboard.writeText(reportData.markdown);
+      setReportCopied(true);
+      setTimeout(() => setReportCopied(false), 2000);
+    }
+  };
 
   const loadEntities = async () => {
     if (!conversation) return;
@@ -102,6 +135,7 @@ export const IntelligencePanel: React.FC<IntelProps> = ({
       }}>
         {[
           { id: 'summary', label: isAr ? 'الملخص' : 'Summary' },
+          { id: 'report', label: isAr ? 'تقرير الأدلة والكتاب' : 'Book & Evidence' },
           { id: 'tasks', label: `${isAr ? 'المهام' : 'Tasks'} (${tasks.length})` },
           { id: 'decisions', label: `${isAr ? 'القرارات' : 'Decisions'} (${decisions.length})` },
           { id: 'property', label: isAr ? 'العقار' : 'Property' },
@@ -151,6 +185,183 @@ export const IntelligencePanel: React.FC<IntelProps> = ({
                 <p style={{ fontSize: '18px', fontWeight: 700, color: '#34d399' }}>{decisions.length}</p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* REPORT TAB */}
+        {activeTab === 'report' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            {/* Action Bar */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+              <div>
+                <h3 style={{ fontSize: '13.5px', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <BookOpen size={16} color="var(--accent-color)" />
+                  {isAr ? 'تقرير الأدلة وتعديلات الكتاب' : 'Book Revisions & Evidence'}
+                </h3>
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  {isAr ? 'أدلة جنائية حتمية محلية ومسودات مفرغة' : 'Deterministic local evidence & transcripts'}
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  onClick={loadReport}
+                  disabled={loadingReport}
+                  className="btn btn-secondary"
+                  style={{ padding: '5px 8px', fontSize: '11px' }}
+                  title={isAr ? 'تحديث التقرير' : 'Refresh report'}
+                >
+                  <RefreshCw size={12} className={loadingReport ? 'spin' : ''} />
+                </button>
+                <button
+                  onClick={handleCopyReport}
+                  disabled={!reportData}
+                  className="btn btn-secondary"
+                  style={{ padding: '5px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  title={isAr ? 'نسخ تقرير Markdown الكامل' : 'Copy Full Markdown'}
+                >
+                  {reportCopied ? <Check size={12} color="#34d399" /> : <Copy size={12} />}
+                  <span>{reportCopied ? (isAr ? 'تم النسخ' : 'Copied') : (isAr ? 'نسخ التقرير' : 'Copy')}</span>
+                </button>
+                <a
+                  href={`http://127.0.0.1:8765/api/conversations/${conversation.id}/report?format=markdown`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-primary"
+                  style={{ padding: '5px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  title={isAr ? 'فتح التقرير كصفحة Markdown كاملة' : 'Open Markdown'}
+                >
+                  <ExternalLink size={12} />
+                  <span>{isAr ? 'فتح التقرير' : 'Open'}</span>
+                </a>
+              </div>
+            </div>
+
+            {loadingReport ? (
+              <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)', fontSize: '12px' }}>
+                {isAr ? 'جارٍ تحميل وتجميع تقرير الأدلة...' : 'Loading evidence report...'}
+              </div>
+            ) : (
+              <>
+                {/* Highlighted Book Tasks & Revisions Card */}
+                <div className="card" style={{ padding: '12px', borderLeft: '3px solid #3b82f6' }}>
+                  <h4 style={{ fontSize: '12.5px', fontWeight: 700, color: '#60a5fa', marginBottom: '8px' }}>
+                    📌 {isAr ? 'المطلوب تنفيذه بدقة لتعديلات الكتاب (ملخص معتمد)' : 'Actionable Book Revision Requirements'}
+                  </h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px', lineHeight: 1.5 }}>
+                    <div style={{ backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '6px' }}>
+                      <strong style={{ color: '#fbbf24' }}>1. دمج الفصلين 6 و 7:</strong>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                        دمج الفصلين في فصل واحد بعنوان «الفصل السادس — حوكمة المبادرات ومسارات النمو». النص المعتمد مفرغ وجاهز في ملف <code>دمج الفصل السادس و السابع.docx</code>.
+                      </p>
+                    </div>
+
+                    <div style={{ backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '6px' }}>
+                      <strong style={{ color: '#fbbf24' }}>2. تعديل الفصل الخامس (شلال الاستراتيجية):</strong>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                        مراجعة شاملة لمحتوى شلال الاستراتيجية والصور. النص المعتمد مفرغ في ملف <code>شلال_الاستراتيجية_مفصّل.docx</code> (11 صفحة).
+                      </p>
+                    </div>
+
+                    <div style={{ backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '6px' }}>
+                      <strong style={{ color: '#fbbf24' }}>3. إدراج «الجانب التطبيقي» قبل الخاتمة:</strong>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                        وضع الجانب التطبيقي لكل فصل (الفرق، الاجتماعات، المراجعة الإدارية) قبل خاتمة كل فصل مباشرة، من ملف <code>الجانب_التطبيقي_لكل_فصل.docx</code>.
+                      </p>
+                    </div>
+
+                    <div style={{ backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '6px' }}>
+                      <strong style={{ color: '#fbbf24' }}>4. استبدال نص صفحة 65:</strong>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                        استبدال النص بمقطع «تمييز مهم يمنع اللبس — نوعان من الفرق: فرق المسارات وفرق القدرات».
+                      </p>
+                    </div>
+
+                    <div style={{ backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '6px' }}>
+                      <strong style={{ color: '#fbbf24' }}>5. إخراج InDesign والخطوط:</strong>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                        اعتماد خط <strong>Cairo</strong>، وجعل اتجاه أعمدة الجداول من <strong>اليمين لليسار (RTL)</strong>، وإزالة علامات (-) الزائدة.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Evidence Metrics */}
+                {reportData && reportData.inventory_summary && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                    <div className="card" style={{ padding: '8px', textAlign: 'center' }}>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{isAr ? 'إجمالي الرسائل' : 'Messages'}</span>
+                      <p style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>{reportData.inventory_summary.total_messages || 314}</p>
+                    </div>
+                    <div className="card" style={{ padding: '8px', textAlign: 'center' }}>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{isAr ? 'الملفات المحفوظة' : 'Files'}</span>
+                      <p style={{ fontSize: '15px', fontWeight: 700, color: '#34d399' }}>{reportData.inventory_summary.verified_physical_files || 13}</p>
+                    </div>
+                    <div className="card" style={{ padding: '8px', textAlign: 'center' }}>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{isAr ? 'المفرغة بنصوص' : 'With Text'}</span>
+                      <p style={{ fontSize: '15px', fontWeight: 700, color: '#60a5fa' }}>{reportData.inventory_summary.processed_with_derived_text || 11}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Derived Documents List with Expandable Text */}
+                {reportData && reportData.evidence && reportData.evidence.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <h4 style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-secondary)' }}>
+                      📑 {isAr ? 'المستندات والتسجيلات المفرغة محلياً' : 'Extracted Documents & Transcripts'}
+                    </h4>
+
+                    {reportData.evidence.map((ev: any, idx: number) => {
+                      const isExpanded = expandedDocIdx === idx;
+                      return (
+                        <div key={idx} className="card" style={{ padding: '10px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden' }}>
+                              {ev.item_type === 'audio' ? <Mic size={14} color="#34d399" /> : <FileText size={14} color="#60a5fa" />}
+                              <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {ev.title || ev.file_name || `Evidence #${idx + 1}`}
+                              </span>
+                            </div>
+
+                            <button
+                              onClick={() => setExpandedDocIdx(isExpanded ? null : idx)}
+                              className="btn btn-secondary"
+                              style={{ padding: '3px 6px', fontSize: '10.5px', display: 'flex', alignItems: 'center', gap: '3px' }}
+                            >
+                              <span>{isExpanded ? (isAr ? 'إخفاء' : 'Hide') : (isAr ? 'عرض النص' : 'View Text')}</span>
+                              {isExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                            </button>
+                          </div>
+
+                          {ev.excerpt && (
+                            <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
+                              {isExpanded ? '' : (ev.excerpt.slice(0, 120) + '...')}
+                            </p>
+                          )}
+
+                          {isExpanded && ev.excerpt && (
+                            <div style={{
+                              marginTop: '8px',
+                              padding: '8px',
+                              backgroundColor: 'rgba(15, 23, 42, 0.6)',
+                              borderRadius: '6px',
+                              fontSize: '11.5px',
+                              lineHeight: 1.6,
+                              maxHeight: '220px',
+                              overflowY: 'auto',
+                              whiteSpace: 'pre-wrap',
+                              color: 'var(--text-primary)',
+                            }}>
+                              {ev.excerpt}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 

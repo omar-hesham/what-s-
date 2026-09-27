@@ -75,6 +75,10 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
       const filter = filterType !== 'all' ? { messageType: filterType } : undefined;
       const data = await apiClient.getMessages(conversation.id, filter);
       setMessages(data);
+      // Automatically scroll to bottom to view latest active messages
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      }, 100);
     } catch (e) {
       console.error(e);
     } finally {
@@ -261,25 +265,26 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
                   {msg.content}
                 </p>
 
-                {/* Omitted Media Box with Attach Action */}
+                {/* Omitted Media Box (Clean, Unobtrusive) */}
                 {isOmitted && (!msg.media_assets || msg.media_assets.length === 0) && (
                   <div style={{
-                    marginTop: '8px',
-                    padding: '8px 10px',
-                    backgroundColor: 'rgba(0, 0, 0, 0.25)',
-                    borderRadius: '8px',
-                    border: '1px dashed var(--border-color)',
+                    marginTop: '6px',
+                    padding: '6px 10px',
+                    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+                    borderRadius: '6px',
+                    border: '1px solid rgba(255, 255, 255, 0.07)',
                     display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px'
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: 'var(--text-secondary)' }}>
-                      {isVoiceOmitted ? <Mic size={14} color="#34d399" /> : isImageOmitted ? <ImageIcon size={14} color="#60a5fa" /> : <FileText size={14} color="#fbbf24" />}
-                      <span style={{ fontWeight: 600 }}>
-                        {isVoiceOmitted ? (isAr ? 'تسجيل صوتي (لم يُصدَّر مع ملف المحادثة)' : 'Voice note omitted in export') :
-                         isImageOmitted ? (isAr ? 'صورة مرفقة (لم تُصدَّر مع ملف المحادثة)' : 'Image omitted in export') :
-                         isDocOmitted ? (isAr ? 'مستند مرفق (لم يُصدَّر مع ملف المحادثة)' : 'Document omitted in export') :
-                         (isAr ? 'ملف وسائط لم يُصدَّر مع المحادثة' : 'Media omitted in export')}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-muted)' }}>
+                      {isVoiceOmitted ? <Mic size={13} color="#34d399" /> : isImageOmitted ? <ImageIcon size={13} color="#60a5fa" /> : <FileText size={13} color="#fbbf24" />}
+                      <span>
+                        {isVoiceOmitted ? (isAr ? 'تسجيل صوتي مستبعد في تصدير واتساب' : 'Voice note omitted in export') :
+                         isImageOmitted ? (isAr ? 'صورة مستبعدة في تصدير واتساب' : 'Image omitted in export') :
+                         isDocOmitted ? (isAr ? 'مستند مستبعد في تصدير واتساب' : 'Document omitted in export') :
+                         (isAr ? 'وسائط مستبعدة في تصدير واتساب' : 'Media omitted in export')}
                       </span>
                     </div>
 
@@ -287,30 +292,28 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
                       onClick={() => handleSelectFile(msg.id)}
                       disabled={uploadingMsgId === msg.id}
                       style={{
-                        alignSelf: isAr ? 'flex-start' : 'flex-end',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '6px',
-                        padding: '4px 10px',
-                        backgroundColor: 'var(--accent-color)',
-                        color: 'white',
+                        gap: '4px',
+                        padding: '3px 8px',
+                        backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                        color: 'var(--text-secondary)',
                         border: 'none',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: 600,
+                        borderRadius: '4px',
+                        fontSize: '10.5px',
                         cursor: uploadingMsgId === msg.id ? 'not-allowed' : 'pointer',
-                        opacity: uploadingMsgId === msg.id ? 0.7 : 1
                       }}
+                      title={isAr ? 'إرفاق الملف يدوياً إذا كان متوفراً لديك' : 'Attach file manually'}
                     >
                       {uploadingMsgId === msg.id ? (
                         <>
-                          <Loader2 size={12} className="spin" />
-                          <span>{isAr ? 'جارٍ التفريغ والتحليل بالذكاء الاصطناعي...' : 'Processing with AI...'}</span>
+                          <Loader2 size={11} className="spin" />
+                          <span>{isAr ? 'معالجة...' : 'Processing...'}</span>
                         </>
                       ) : (
                         <>
-                          <Paperclip size={12} />
-                          <span>{isAr ? 'إرفاق الملف الآن (صوت / صورة / مستند)' : 'Attach File Now'}</span>
+                          <Paperclip size={11} />
+                          <span>{isAr ? 'إرفاق اختياري' : 'Attach'}</span>
                         </>
                       )}
                     </button>

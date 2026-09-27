@@ -3,7 +3,7 @@ FastAPI application entry point for Omar WhatsApp Intelligence (OWI).
 Configures middleware, lifecycle hooks, and mounts API routers.
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from owi.config import settings

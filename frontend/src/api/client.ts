@@ -11,6 +11,30 @@ import {
 const API_BASE = 'http://127.0.0.1:8765';
 
 export const apiClient = {
+  // Session bootstrap helper to auto-authenticate local loopback
+  async ensureSession(): Promise<boolean> {
+    try {
+      const check = await fetch(`${API_BASE}/api/auth/session`, { credentials: 'include' });
+      const sessionData = await check.json();
+      if (sessionData.authenticated) return true;
+
+      const bootRes = await fetch(`${API_BASE}/api/auth/bootstrap`, { credentials: 'include' });
+      const boot = await bootRes.json();
+      if (boot.bootstrap_token) {
+        await fetch(`${API_BASE}/api/auth/exchange`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ bootstrap_token: boot.bootstrap_token }),
+        });
+        return true;
+      }
+    } catch (e) {
+      console.error('Failed to ensure local session:', e);
+    }
+    return false;
+  },
+
   // Media URL helper
   getMediaUrl(mediaAssetId: number): string {
     return `${API_BASE}/api/media/${mediaAssetId}/file`;
@@ -18,12 +42,22 @@ export const apiClient = {
 
   // Conversations
   async getConversations(): Promise<Conversation[]> {
-    const res = await fetch(`${API_BASE}/api/conversations`);
+    const res = await fetch(`${API_BASE}/api/conversations`, { credentials: 'include' });
     return res.json();
   },
 
   async getConversation(id: number): Promise<Conversation> {
-    const res = await fetch(`${API_BASE}/api/conversations/${id}`);
+    const res = await fetch(`${API_BASE}/api/conversations/${id}`, { credentials: 'include' });
+    return res.json();
+  },
+
+  async getConversationReport(id: number): Promise<any> {
+    const res = await fetch(`${API_BASE}/api/conversations/${id}/report`, { credentials: 'include' });
+    return res.json();
+  },
+
+  async getConversationInventory(id: number): Promise<any> {
+    const res = await fetch(`${API_BASE}/api/conversations/${id}/inventory`, { credentials: 'include' });
     return res.json();
   },
 
@@ -34,6 +68,7 @@ export const apiClient = {
     const res = await fetch(`${API_BASE}/api/conversations/import/text`, {
       method: 'POST',
       body: formData,
+      credentials: 'include',
     });
     return res.json();
   },
@@ -45,17 +80,18 @@ export const apiClient = {
     const res = await fetch(`${API_BASE}/api/conversations/import/zip`, {
       method: 'POST',
       body: formData,
+      credentials: 'include',
     });
     return res.json();
   },
 
   async deleteConversation(id: number): Promise<any> {
-    const res = await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE' });
+    const res = await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE', credentials: 'include' });
     return res.json();
   },
 
   async analyzeConversation(id: number): Promise<any> {
-    const res = await fetch(`${API_BASE}/api/conversations/${id}/analyze`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/api/conversations/${id}/analyze`, { method: 'POST', credentials: 'include' });
     return res.json();
   },
 
@@ -64,10 +100,10 @@ export const apiClient = {
     conversationId: number, 
     filter?: { messageType?: string; sender?: string }
   ): Promise<Message[]> {
-    let url = `${API_BASE}/api/conversations/${conversationId}/messages?limit=300`;
+    let url = `${API_BASE}/api/conversations/${conversationId}/messages?limit=2000`;
     if (filter?.messageType) url += `&message_type=${filter.messageType}`;
     if (filter?.sender) url += `&sender=${encodeURIComponent(filter.sender)}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { credentials: 'include' });
     return res.json();
   },
 

@@ -2,7 +2,7 @@ import React, { useRef } from 'react';
 import {
   Inbox, Calendar, MessageSquare, CheckSquare, Clock,
   Award, Lightbulb, Building2, BookOpen, Search,
-  HardDrive, DollarSign, Cpu, Settings, Upload, Globe
+  HardDrive, DollarSign, Cpu, Settings, Upload, Globe, ClipboardList
 } from 'lucide-react';
 import { Conversation } from '../types';
 
@@ -36,6 +36,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const navItems = [
     { id: 'inbox', label: isAr ? 'الوارد الذكي' : 'AI Inbox', icon: Inbox, badge: inboxCount },
     { id: 'today', label: isAr ? 'اليوم والموجز' : 'Today & Briefing', icon: Calendar },
+    { id: 'requirements', label: isAr ? 'ملخص المتطلبات والقرارات' : 'Requirements & Brief', icon: ClipboardList },
     { id: 'search', label: isAr ? 'البحث الشامل (Ctrl+K)' : 'Global Search (Ctrl+K)', icon: Search },
     { id: 'timeline', label: isAr ? 'المحادثات' : 'Chats Timeline', icon: MessageSquare },
     { id: 'tasks', label: isAr ? 'المهام' : 'Tasks', icon: CheckSquare },

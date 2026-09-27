@@ -261,9 +261,30 @@ export const ConversationTimeline: React.FC<TimelineProps> = ({
                 </div>
 
                 {/* Message Body */}
-                <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
-                  {msg.content}
-                </p>
+                {(() => {
+                  const content = msg.content || '';
+                  const cleanContent = content
+                    .replace(/^<image omitted>\s*/i, '')
+                    .replace(/^<voice message omitted>\s*/i, '')
+                    .replace(/^<document omitted>\s*/i, '')
+                    .replace(/^<Media omitted>\s*/i, '')
+                    .trim();
+
+                  if (msg.media_assets && msg.media_assets.length > 0) {
+                    if (!cleanContent) return null;
+                    return (
+                      <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4, marginBottom: '6px' }}>
+                        {cleanContent}
+                      </p>
+                    );
+                  }
+
+                  return (
+                    <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                      {content}
+                    </p>
+                  );
+                })()}
 
                 {/* Omitted Media Box (Clean, Unobtrusive) */}
                 {isOmitted && (!msg.media_assets || msg.media_assets.length === 0) && (

@@ -14,6 +14,7 @@ import { StorageDashboard } from './components/StorageDashboard';
 import { DecisionsView } from './components/DecisionsView';
 import { IdeasView } from './components/IdeasView';
 import { ResearchView } from './components/ResearchView';
+import { RequirementsView } from './components/RequirementsView';
 import { SearchModal } from './components/SearchModal';
 import { FirstRunWizard } from './components/FirstRunWizard';
 
@@ -182,6 +183,15 @@ export const App: React.FC = () => {
             conversation={selectedConversation}
             onRefreshConversation={handleRefreshConversation}
             language={language}
+          />
+        )}
+        {currentView === 'requirements' && (
+          <RequirementsView
+            conversation={selectedConversation}
+            conversations={conversations}
+            onSelectConversation={(id) => setSelectedConversationId(id)}
+            language={language}
+            onOpenTimeline={() => setCurrentView('timeline')}
           />
         )}
         {currentView === 'today' && <TodayDashboard language={language} />}

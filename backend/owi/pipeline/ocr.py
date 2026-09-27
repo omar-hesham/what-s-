@@ -125,7 +125,15 @@ class ImageAnalyzer:
             cmd.extend(["--tessdata-dir", str(tessdata_dir)])
 
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
             if res.returncode == 0:
                 extracted_text = (res.stdout or "").strip()
                 logger.info(f"Tesseract OCR extracted {len(extracted_text)} chars from {img_path.name}")

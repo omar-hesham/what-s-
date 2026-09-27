@@ -154,6 +154,7 @@ def test_nlp_task_idempotency(test_db):
     assert len(tasks2) == 1
     assert tasks2[0].status == "completed"
 
-def test_gemini_service_configured():
+def test_gemini_service_configured(monkeypatch):
     # Verify Gemini service detects local configuration
+    monkeypatch.setenv("GEMINI_API_KEY", "test_key_for_testing_12345")
     assert GeminiService.is_configured() is True
